@@ -2,7 +2,7 @@
  *
  * Description:		See "columninfo.c"
  *
- * Comments:		See "notice.txt" for copyright and license information.
+ * Comments:		See "readme.txt" for copyright and license information.
  *
  */
 
@@ -13,6 +13,8 @@
 
 struct ColumnInfoClass_
 {
+	UInt4		refcount;	/* reference count. A ColumnInfo can be shared by
+							 * several qresults. */
 	Int2		num_fields;
 	struct srvr_info
 	{

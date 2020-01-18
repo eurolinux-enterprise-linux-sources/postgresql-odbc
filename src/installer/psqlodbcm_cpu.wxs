@@ -59,7 +59,6 @@
           
           <!-- Gettext -->
           <File Id="libintl_8.dll" Name="libintl-8.dll" Source="$(var.LIBPQBINDIR)\libintl-8.dll" />
-          <File Id="libiconv_2.dll" Name="libiconv-2.dll" Source="$(var.LIBPQBINDIR)\libiconv-2.dll" />
           
           <!-- SSL -->
           <File Id="libeay32.dll" Name="libeay32.dll" Source="$(var.LIBPQBINDIR)\libeay32.dll" />

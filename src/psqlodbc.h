@@ -3,10 +3,7 @@
  * Description:		This file contains defines and declarations that are related to
  *					the entire driver.
  *
- * Comments:		See "notice.txt" for copyright and license information.
- *
- * $Id: psqlodbc.h,v 1.135 2011/06/19 12:27:30 hinoue Exp $
- *
+ * Comments:		See "readme.txt" for copyright and license information.
  */
 
 #ifndef __PSQLODBC_H__
@@ -37,8 +34,38 @@
 #define _CRTDBG_MAP_ALLOC
 #include <crtdbg.h>
 #endif /* _MEMORY_DEBUG_ */
+#else  /* _DEBUG */
+#include <stdlib.h>
 #endif /* _DEBUG */
 #endif /* WIN32 */
+
+#ifdef	_MEMORY_DEBUG_
+void		*pgdebug_alloc(size_t);
+void		*pgdebug_calloc(size_t, size_t);
+void		*pgdebug_realloc(void *, size_t);
+char		*pgdebug_strdup(const char *);
+void		*pgdebug_memcpy(void *, const void *, size_t);
+void		*pgdebug_memset(void *, int c, size_t);
+char		*pgdebug_strcpy(char *, const char *);
+char		*pgdebug_strncpy(char *, const char *, size_t);
+char		*pgdebug_strncpy_null(char *, const char *, size_t);
+void		pgdebug_free(void *);
+void		debug_memory_check(void);
+
+#ifdef	WIN32
+#undef strdup
+#endif /* WIN32 */
+#define malloc	pgdebug_alloc
+#define realloc pgdebug_realloc
+#define calloc	pgdebug_calloc
+#define strdup	pgdebug_strdup
+#define free	pgdebug_free
+#define strcpy	pgdebug_strcpy
+#define strncpy	pgdebug_strncpy
+/* #define strncpy_null	pgdebug_strncpy_null */
+#define memcpy	pgdebug_memcpy
+#define memset	pgdebug_memset
+#endif   /* _MEMORY_DEBUG_ */
 
 #ifdef	WIN32
 #include <delayimp.h>
@@ -148,10 +175,10 @@ typedef	unsigned long long ULONG_PTR;
 #else
 #error appropriate long pointer type not found 
 #endif /* SIZEOF_VOID_P */
-#if (SIZEOF_VOID_P == 8)
+#if (SIZEOF_LONG == 8)
 #define	FORMAT_INTEGER	"%d"	/* SQLINTEGER */
 #define	FORMAT_UINTEGER	"%u"	/* SQLUINTEGER */
-#if defined(WITH_UNIXODBC) && !defined(BUILD_REAL_64_BIT_MODE)
+#if defined(WITH_UNIXODBC) && defined(BUILD_LEGACY_64_BIT_MODE)
 #define FORMAT_LEN	"%d"	/* SQLLEN */
 #define FORMAT_ULEN	"%u"	/* SQLULEN */
 #else
@@ -237,7 +264,9 @@ typedef double SDOUBLE;
 #endif /* DBMS_NAME */
 #else
 #define DRIVER_ODBC_VER				"02.50"
+#ifndef DBMS_NAME
 #define DBMS_NAME				"PostgreSQL Legacy"
+#endif   /* DBMS_NAME */
 #endif   /* ODBCVER */
 
 #ifdef WIN32
@@ -382,8 +411,78 @@ typedef struct IPDFields_ IPDFields;
 typedef struct col_info COL_INFO;
 typedef struct lo_arg LO_ARG;
 
+
+/*	pgNAME type define */
+typedef struct
+{
+	char	*name;
+} pgNAME;
+#define	GET_NAME(the_name)	((the_name).name)
+#define	SAFE_NAME(the_name)	((the_name).name ? (the_name).name : NULL_STRING)
+#define	PRINT_NAME(the_name)	((the_name).name ? (the_name).name : PRINT_NULL)
+#define	NAME_IS_NULL(the_name)	(NULL == (the_name).name)
+#define	NAME_IS_VALID(the_name)	(NULL != (the_name).name)
+#define	INIT_NAME(the_name) ((the_name).name = NULL)
+#define	NULL_THE_NAME(the_name) \
+do { \
+	if ((the_name).name) free((the_name).name); \
+	(the_name).name = NULL; \
+} while (0)
+#define	STR_TO_NAME(the_name, str) \
+do { \
+	if ((the_name).name) \
+		free((the_name).name); \
+	(the_name).name = (str ? strdup((str)) : NULL); \
+} while (0)
+#define	STRX_TO_NAME(the_name, str) \
+do { \
+	if ((the_name).name) \
+		free((the_name).name); \
+	(the_name).name = strdup((str)); \
+} while (0)
+#define	STRN_TO_NAME(the_name, str, n) \
+do { \
+	if ((the_name).name) \
+		free((the_name).name); \
+	if (str) \
+	{ \
+		(the_name).name = malloc((n) + 1); \
+		memcpy((the_name).name, str, (n)); \
+		(the_name).name[(n)] = '\0'; \
+	} \
+	else \
+		(the_name).name = NULL; \
+} while (0)
+#define	NAME_TO_STR(str, the_name) \
+do {\
+	if ((the_name).name) strcpy(str, (the_name).name); \
+	else *str = '\0'; \
+} while (0)
+#define	NAME_TO_NAME(to, from) \
+do { \
+	if ((to).name) \
+		free((to).name); \
+	if ((from).name) \
+		(to).name = strdup(from.name); \
+	else \
+		(to).name = NULL; \
+} while (0)
+#define	MOVE_NAME(to, from) \
+do { \
+	if ((to).name) \
+		free((to).name); \
+	(to).name = (from).name; \
+	(from).name = NULL; \
+} while (0)
+#define	SET_NAME_DIRECTLY(the_name, str) ((the_name).name = (str))
+
+#define	NAMECMP(name1, name2) (strcmp(SAFE_NAME(name1), SAFE_NAME(name2)))
+#define	NAMEICMP(name1, name2) (stricmp(SAFE_NAME(name1), SAFE_NAME(name2)))
+/*	pgNAME define end */
+
 typedef struct GlobalValues_
 {
+	pgNAME		drivername;
 	int			fetch_max;
 	int			socket_buffersize;
 	int			unknown_sizes;
@@ -404,9 +503,12 @@ typedef struct GlobalValues_
 	char		parse;
 	char		cancel_as_freestmt;
 	char		extra_systable_prefixes[MEDIUM_REGISTRY_LEN];
-	char		conn_settings[LARGE_REGISTRY_LEN];
 	char		protocol[SMALL_REGISTRY_LEN];
+	pgNAME		conn_settings;
 } GLOBAL_VALUES;
+
+void copy_globals(GLOBAL_VALUES *to, const GLOBAL_VALUES *from);
+void finalize_globals(GLOBAL_VALUES *glbv);
 
 typedef struct StatementOptions_
 {
@@ -496,42 +598,19 @@ int	wstrtomsg(const char *, const LPWSTR, int, char *, int);
 #define	utf8_to_ucs2(utf8str, ilen, ucs2str, buflen) utf8_to_ucs2_lf0(utf8str, ilen, FALSE, ucs2str, buflen)
 #endif /* UNICODE_SUPPORT */
 
+/* Define a type for defining a constant string expression */
+#ifndef	CSTR
+#define	CSTR static const char * const
+#endif	/* CSTR */
 
-#ifdef	_MEMORY_DEBUG_
-void		*debug_alloc(size_t);
-void		*debug_calloc(size_t, size_t);
-void		*debug_realloc(void *, size_t);
-char		*debug_strdup(const char *);
-void		*debug_memcpy(void *, const void *, size_t);
-void		*debug_memset(void *, int c, size_t);
-char		*debug_strcpy(char *, const char *);
-char		*debug_strncpy(char *, const char *, size_t);
-char		*debug_strncpy_null(char *, const char *, size_t);
-void		debug_free(void *);
-void		debug_memory_check(void);
-
-#ifdef	WIN32
-#undef strdup
-#endif /* WIN32 */
-#define malloc	debug_alloc
-#define realloc debug_realloc
-#define calloc	debug_calloc
-#define strdup	debug_strdup
-#define free	debug_free
-#define strcpy	debug_strcpy
-#define strncpy	debug_strncpy
-/* #define strncpy_null	debug_strncpy_null */
-#define memcpy	debug_memcpy
-#define memset	debug_memset
-#endif   /* _MEMORY_DEBUG_ */
+CSTR	NULL_STRING = "";
+CSTR	PRINT_NULL = "(null)";
+CSTR	OID_NAME = "oid";
 
 #ifdef	__cplusplus
 }
 #endif
 
-#include "misc.h"
+#include "mylog.h"
 
-CSTR	NULL_STRING = "";
-CSTR	PRINT_NULL = "(null)";
-CSTR	OID_NAME = "oid";
 #endif /* __PSQLODBC_H__ */

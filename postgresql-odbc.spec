@@ -1,7 +1,7 @@
 Name: postgresql-odbc
 Summary: PostgreSQL ODBC driver
-Version: 09.01.0200
-Release: 3%{?dist}
+Version: 09.03.0100
+Release: 2%{?dist}
 License: LGPLv2+
 Group: Applications/Databases
 URL: http://psqlodbc.projects.postgresql.org/
@@ -71,6 +71,15 @@ popd
 %doc license.txt readme.txt docs/*
 
 %changelog
+* Fri Jan 24 2014 Daniel Mach <dmach@redhat.com> - 09.03.0100-2
+- Mass rebuild 2014-01-24
+
+* Mon Jan 06 2014 Pavel Raiskup <praiskup@redhat.com> - 09.03.0100-1
+- update to new release
+
+* Fri Dec 27 2013 Daniel Mach <dmach@redhat.com> - 09.01.0200-4
+- Mass rebuild 2013-12-27
+
 * Thu Feb 14 2013 Fedora Release Engineering <rel-eng@lists.fedoraproject.org> - 09.01.0200-3
 - Rebuilt for https://fedoraproject.org/wiki/Fedora_19_Mass_Rebuild
 

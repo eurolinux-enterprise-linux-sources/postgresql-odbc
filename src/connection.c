@@ -9,15 +9,21 @@
  * API functions:	SQLAllocConnect, SQLConnect, SQLDisconnect, SQLFreeConnect,
  *					SQLBrowseConnect(NI)
  *
- * Comments:		See "notice.txt" for copyright and license information.
+ * Comments:		See "readme.txt" for copyright and license information.
  *-------
  */
 /* Multibyte support	Eiji Tokuya 2001-03-15 */
+
+/*	TryEnterCritiaclSection needs the following #define */
+#ifndef	_WIN32_WINNT
+#define	_WIN32_WINNT	0x0400
+#endif /* _WIN32_WINNT */
 
 #include "connection.h"
 #ifndef	NOT_USE_LIBPQ
 #include <libpq-fe.h>
 #endif /* NOT_USE_LIBPQ */
+#include "misc.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -116,7 +122,7 @@ PGAPI_Connect(
 	ConnInfo   *ci;
 	CSTR func = "PGAPI_Connect";
 	RETCODE	ret = SQL_SUCCESS;
-	char	fchar;
+	char	fchar, *tmpstr;
 
 	mylog("%s: entering..cbDSN=%hi.\n", func, cbDSN);
 
@@ -127,11 +133,11 @@ PGAPI_Connect(
 	}
 
 	ci = &conn->connInfo;
+	CC_conninfo_init(ci, COPY_GLOBALS);
 
 	make_string(szDSN, cbDSN, ci->dsn, sizeof(ci->dsn));
 
 	/* get the values for the DSN from the registry */
-	memcpy(&ci->drivers, &globals, sizeof(globals));
 	getDSNinfo(ci, CONN_OVERWRITE);
 	logs_on_off(1, ci->drivers.debug, ci->drivers.commlog);
 	/* initialize pg_version from connInfo.protocol    */
@@ -145,15 +151,18 @@ PGAPI_Connect(
 	make_string(szUID, cbUID, ci->username, sizeof(ci->username));
 	if ('\0' == ci->username[0]) /* an empty string is specified */
 		ci->username[0] = fchar; /* restore the original username */
-	fchar = ci->password[0]; 
-	make_string(szAuthStr, cbAuthStr, ci->password, sizeof(ci->password));
-	if ('\0' == ci->password[0]) /* an empty string is specified */
-		ci->password[0] = fchar; /* restore the original password */
+	tmpstr = make_string(szAuthStr, cbAuthStr, NULL, 0);
+	if (tmpstr)
+	{
+		if (tmpstr[0]) /* non-empty string is specified */
+			STR_TO_NAME(ci->password, tmpstr);
+		free(tmpstr);
+	}
 
 	/* fill in any defaults */
 	getDSNdefaults(ci);
 
-	qlog("conn = %p, %s(DSN='%s', UID='%s', PWD='%s')\n", conn, func, ci->dsn, ci->username, ci->password ? "xxxxx" : "");
+	qlog("conn = %p, %s(DSN='%s', UID='%s', PWD='%s')\n", conn, func, ci->dsn, ci->username, NAME_IS_VALID(ci->password) ? "xxxxx" : "");
 
 	if ((fchar = CC_connect(conn, AUTH_REQ_OK, NULL)) <= 0)
 	{
@@ -218,7 +227,7 @@ PGAPI_Disconnect(
 	mylog("%s: about to CC_cleanup\n", func);
 
 	/* Close the connection and free statements */
-	CC_cleanup(conn);
+	CC_cleanup(conn, FALSE);
 
 	mylog("%s: done CC_cleanup\n", func);
 	mylog("%s: returning...\n", func);
@@ -259,31 +268,98 @@ PGAPI_FreeConnect(
 	return SQL_SUCCESS;
 }
 
-void
-CC_conninfo_init(ConnInfo *conninfo)
+static void
+CC_conninfo_release(ConnInfo *conninfo)
 {
-		memset(conninfo, 0, sizeof(ConnInfo));
-		conninfo->disallow_premature = -1;
-		conninfo->allow_keyset = -1;
-		conninfo->lf_conversion = -1;
-		conninfo->true_is_minus1 = -1;
-		conninfo->int8_as = -101;
-		conninfo->bytea_as_longvarbinary = -1;
-		conninfo->use_server_side_prepare = -1;
-		conninfo->lower_case_identifier = -1;
-		conninfo->rollback_on_error = -1;
-		conninfo->force_abbrev_connstr = -1;
-		conninfo->bde_environment = -1;
-		conninfo->fake_mss = -1;
-		conninfo->cvt_null_date_string = -1;
-		conninfo->autocommit_public = SQL_AUTOCOMMIT_ON;
-		conninfo->accessible_only = -1;
-		conninfo->gssauth_use_gssapi = -1;
-#ifdef	_HANDLE_ENLIST_IN_DTC_
-		conninfo->xa_opt = -1;
-#endif /* _HANDLE_ENLIST_IN_DTC_ */
-		memcpy(&(conninfo->drivers), &globals, sizeof(globals));
+	NULL_THE_NAME(conninfo->password);
+	NULL_THE_NAME(conninfo->conn_settings);
+	finalize_globals(&conninfo->drivers);
 }
+
+void
+CC_conninfo_init(ConnInfo *conninfo, UInt4 option)
+{
+	CSTR	func = "CC_conninfo_init";
+	mylog("%s opt=%d\n", func, option);
+
+	if (0 != (CLEANUP_FOR_REUSE & option))
+		CC_conninfo_release(conninfo);
+	memset(conninfo, 0, sizeof(ConnInfo));
+	conninfo->disallow_premature = -1;
+	conninfo->allow_keyset = -1;
+	conninfo->lf_conversion = -1;
+	conninfo->true_is_minus1 = -1;
+	conninfo->int8_as = -101;
+	conninfo->bytea_as_longvarbinary = -1;
+	conninfo->use_server_side_prepare = -1;
+	conninfo->lower_case_identifier = -1;
+	conninfo->rollback_on_error = -1;
+	conninfo->force_abbrev_connstr = -1;
+	conninfo->bde_environment = -1;
+	conninfo->fake_mss = -1;
+	conninfo->cvt_null_date_string = -1;
+	conninfo->autocommit_public = SQL_AUTOCOMMIT_ON;
+	conninfo->accessible_only = -1;
+	conninfo->gssauth_use_gssapi = -1;
+#ifdef	_HANDLE_ENLIST_IN_DTC_
+	conninfo->xa_opt = -1;
+#endif /* _HANDLE_ENLIST_IN_DTC_ */
+	if (0 != (COPY_GLOBALS & option))
+		copy_globals(&(conninfo->drivers), &globals);
+}
+
+#define	CORR_STRCPY(item)	strncpy_null(ci->item, sci->item, sizeof(ci->item))
+#define	CORR_VALCPY(item)	(ci->item = sci->item)
+
+void
+CC_copy_conninfo(ConnInfo *ci, const ConnInfo *sci)
+{
+	memset(ci, 0,sizeof(ConnInfo));
+
+	CORR_STRCPY(dsn);
+	CORR_STRCPY(desc);
+	CORR_STRCPY(drivername);
+	CORR_STRCPY(server);
+	CORR_STRCPY(database);
+	CORR_STRCPY(username);
+	NAME_TO_NAME(ci->password, sci->password);
+	CORR_STRCPY(protocol);
+	CORR_STRCPY(port);
+	CORR_STRCPY(sslmode);
+	CORR_STRCPY(onlyread);
+	CORR_STRCPY(fake_oid_index);
+	CORR_STRCPY(show_oid_column);
+	CORR_STRCPY(row_versioning);
+	CORR_STRCPY(show_system_tables);
+	CORR_STRCPY(translation_dll);
+	CORR_STRCPY(translation_option);
+	CORR_VALCPY(focus_password);
+	NAME_TO_NAME(ci->conn_settings, sci->conn_settings);
+	CORR_VALCPY(disallow_premature);
+	CORR_VALCPY(allow_keyset);
+	CORR_VALCPY(updatable_cursors);
+	CORR_VALCPY(lf_conversion);
+	CORR_VALCPY(true_is_minus1);
+	CORR_VALCPY(int8_as);
+	CORR_VALCPY(bytea_as_longvarbinary);
+	CORR_VALCPY(use_server_side_prepare);
+	CORR_VALCPY(lower_case_identifier);
+	CORR_VALCPY(rollback_on_error);
+	CORR_VALCPY(force_abbrev_connstr);
+	CORR_VALCPY(bde_environment);
+	CORR_VALCPY(fake_mss);
+	CORR_VALCPY(cvt_null_date_string);
+	CORR_VALCPY(autocommit_public);
+	CORR_VALCPY(accessible_only);
+	CORR_VALCPY(gssauth_use_gssapi);
+	CORR_VALCPY(extra_opts);
+#ifdef	_HANDLE_ENLIST_IN_DTC_
+	CORR_VALCPY(xa_opt);
+#endif 
+	copy_globals(&(ci->drivers), &(sci->drivers));	/* moved from driver's option */
+}
+#undef	CORR_STRCPY
+#undef	CORR_VALCPY
 
 #ifdef	WIN32
 extern	int	platformId;
@@ -303,72 +379,91 @@ reset_current_schema(ConnectionClass *self)
 	}
 }
 
-ConnectionClass *
-CC_Constructor()
+static ConnectionClass *CC_alloc()
 {
-	ConnectionClass *rv, *retrv = NULL;
+	return (ConnectionClass *) calloc(sizeof(ConnectionClass), 1);
+}
 
-	rv = (ConnectionClass *) calloc(sizeof(ConnectionClass), 1);
+static void
+CC_lockinit(ConnectionClass *self)
+{
+	INIT_CONNLOCK(self);
+	INIT_CONN_CS(self);
+}
 
-	if (rv != NULL)
-	{
-		rv->status = CONN_NOT_CONNECTED;
-		rv->transact_status = CONN_IN_AUTOCOMMIT;		/* autocommit by default */
-		rv->stmt_in_extquery = NULL;
+static ConnectionClass *
+CC_initialize(ConnectionClass *rv, BOOL lockinit)
+{
+	ConnectionClass *retrv = NULL;
+	size_t		clear_size;
 
-		CC_conninfo_init(&(rv->connInfo));
-		rv->sock = SOCK_Constructor(rv);
-		if (!rv->sock)
-			goto cleanup;
+#if defined(WIN_MULTITHREAD_SUPPORT) || defined(POSIX_THREADMUTEX_SUPPORT)
+	clear_size = (char *)&(rv->cs) - (char *)rv;
+#else
+	clear_size = sizeof(ConnectionClass);
+#endif /* WIN_MULTITHREAD_SUPPORT */
 
-		rv->stmts = (StatementClass **) malloc(sizeof(StatementClass *) * STMT_INCREMENT);
-		if (!rv->stmts)
-			goto cleanup;
-		memset(rv->stmts, 0, sizeof(StatementClass *) * STMT_INCREMENT);
+	memset(rv, 0, clear_size);
+	rv->status = CONN_NOT_CONNECTED;
+	rv->transact_status = CONN_IN_AUTOCOMMIT;		/* autocommit by default */
+	rv->stmt_in_extquery = NULL;
 
-		rv->num_stmts = STMT_INCREMENT;
+	rv->stmts = (StatementClass **) malloc(sizeof(StatementClass *) * STMT_INCREMENT);
+	if (!rv->stmts)
+		goto cleanup;
+	memset(rv->stmts, 0, sizeof(StatementClass *) * STMT_INCREMENT);
+
+	rv->num_stmts = STMT_INCREMENT;
 #if (ODBCVER >= 0x0300)
-		rv->descs = (DescriptorClass **) malloc(sizeof(DescriptorClass *) * STMT_INCREMENT);
-		if (!rv->descs)
-			goto cleanup;
-		memset(rv->descs, 0, sizeof(DescriptorClass *) * STMT_INCREMENT);
+	rv->descs = (DescriptorClass **) malloc(sizeof(DescriptorClass *) * STMT_INCREMENT);
+	if (!rv->descs)
+		goto cleanup;
+	memset(rv->descs, 0, sizeof(DescriptorClass *) * STMT_INCREMENT);
 
-		rv->num_descs = STMT_INCREMENT;
+	rv->num_descs = STMT_INCREMENT;
 #endif /* ODBCVER */
 
-		rv->lobj_type = PG_TYPE_LO_UNDEFINED;
-		rv->driver_version = ODBCVER;
+	rv->lobj_type = PG_TYPE_LO_UNDEFINED;
+	rv->driver_version = ODBCVER;
 #ifdef	WIN32
-		if (VER_PLATFORM_WIN32_WINDOWS == platformId && rv->driver_version > 0x0300)
-			rv->driver_version = 0x0300;
+	if (VER_PLATFORM_WIN32_WINDOWS == platformId && rv->driver_version > 0x0300)
+		rv->driver_version = 0x0300;
 #endif /* WIN32 */
-		if (isMsAccess())
-			rv->ms_jet = 1;
-		rv->isolation = SQL_TXN_READ_COMMITTED;
-		rv->mb_maxbyte_per_char = 1;
-		rv->max_identifier_length = -1;
-		rv->escape_in_literal = ESCAPE_IN_LITERAL;
+	if (isMsAccess())
+		rv->ms_jet = 1;
+	rv->isolation = SQL_TXN_READ_COMMITTED;
+	rv->mb_maxbyte_per_char = 1;
+	rv->max_identifier_length = -1;
+	rv->escape_in_literal = ESCAPE_IN_LITERAL;
 
-		/* Initialize statement options to defaults */
-		/* Statements under this conn will inherit these options */
+	/* Initialize statement options to defaults */
+	/* Statements under this conn will inherit these options */
 
-		InitializeStatementOptions(&rv->stmtOptions);
-		InitializeARDFields(&rv->ardOptions);
-		InitializeAPDFields(&rv->apdOptions);
+	InitializeStatementOptions(&rv->stmtOptions);
+	InitializeARDFields(&rv->ardOptions);
+	InitializeAPDFields(&rv->apdOptions);
 #ifdef	_HANDLE_ENLIST_IN_DTC_
-		// rv->asdum = NULL;
+	rv->asdum = NULL;
+	rv->gTranInfo = 0;
 #endif /* _HANDLE_ENLIST_IN_DTC_ */
-		INIT_CONNLOCK(rv);
-		INIT_CONN_CS(rv);
-		retrv = rv;
-	}
-
+	if (lockinit)
+		CC_lockinit(rv);
+	retrv = rv;
 cleanup:
 	if (rv && !retrv)
 		CC_Destructor(rv);
 	return retrv;
 }
 
+ConnectionClass *
+CC_Constructor()
+{
+	ConnectionClass *rv, *retrv = NULL;
+
+	if (rv = CC_alloc(), NULL != rv)
+		retrv = CC_initialize(rv, TRUE);
+	return retrv;
+}
 
 char
 CC_Destructor(ConnectionClass *self)
@@ -378,7 +473,7 @@ CC_Destructor(ConnectionClass *self)
 	if (self->status == CONN_EXECUTING)
 		return 0;
 
-	CC_cleanup(self);			/* cleanup socket and statements */
+	CC_cleanup(self, FALSE);			/* cleanup socket and statements */
 
 	mylog("after CC_Cleanup\n");
 
@@ -399,6 +494,7 @@ CC_Destructor(ConnectionClass *self)
 
 	NULL_THE_NAME(self->schemaIns);
 	NULL_THE_NAME(self->tableIns);
+	CC_conninfo_release(&self->connInfo);
 	if (self->__error_message)
 		free(self->__error_message);
 	DELETE_CONN_CS(self);
@@ -451,6 +547,16 @@ CC_clear_error(ConnectionClass *self)
 	self->sqlstate[0] = '\0';
 	self->errormsg_created = FALSE;
 	CONNLOCK_RELEASE(self);
+}
+
+void
+CC_examine_global_transaction(ConnectionClass *self)
+{
+	if (!self)	return;
+#ifdef	_HANDLE_ENLIST_IN_DTC_
+	if (CC_is_in_global_trans(self))
+		CALL_IsolateDtcConn(self, TRUE);
+#endif /* _HANDLE_ENLIST_IN_DTC_ */
 }
 
 static void
@@ -594,7 +700,7 @@ CC_clear_col_info(ConnectionClass *self, BOOL destroy)
 
 /* This is called by SQLDisconnect also */
 char
-CC_cleanup(ConnectionClass *self)
+CC_cleanup(ConnectionClass *self, BOOL keepCommunication)
 {
 	int			i;
 	StatementClass *stmt;
@@ -605,18 +711,22 @@ CC_cleanup(ConnectionClass *self)
 
 	mylog("in CC_Cleanup, self=%p\n", self);
 
+	ENTER_CONN_CS(self);
 	/* Cancel an ongoing transaction */
 	/* We are always in the middle of a transaction, */
 	/* even if we are in auto commit. */
 	if (self->sock)
 	{
-		CC_abort(self);
+		if (!keepCommunication)
+		{
+			CC_abort(self);
 
-		mylog("after CC_abort\n");
+			mylog("after CC_abort\n");
 
-		/* This actually closes the connection to the dbase */
-		SOCK_Destructor(self->sock);
-		self->sock = NULL;
+			/* This actually closes the connection to the dbase */
+			SOCK_Destructor(self->sock);
+			self->sock = NULL;
+		}
 	}
 
 	mylog("after SOCK destructor\n");
@@ -651,33 +761,39 @@ CC_cleanup(ConnectionClass *self)
 
 	/* Check for translation dll */
 #ifdef WIN32
-	if (self->translation_handle)
+	if (!keepCommunication && self->translation_handle)
 	{
 		FreeLibrary(self->translation_handle);
 		self->translation_handle = NULL;
 	}
 #endif
 
-	self->status = CONN_NOT_CONNECTED;
-	self->transact_status = CONN_IN_AUTOCOMMIT;
+	if (!keepCommunication)
+	{
+		self->status = CONN_NOT_CONNECTED;
+		self->transact_status = CONN_IN_AUTOCOMMIT;
+	}
 	self->stmt_in_extquery = NULL;
-	CC_conninfo_init(&(self->connInfo));
-	if (self->original_client_encoding)
+	if (!keepCommunication)
 	{
-		free(self->original_client_encoding);
-		self->original_client_encoding = NULL;
+		CC_conninfo_init(&(self->connInfo), CLEANUP_FOR_REUSE);
+		if (self->original_client_encoding)
+		{
+			free(self->original_client_encoding);
+			self->original_client_encoding = NULL;
+		}
+		if (self->current_client_encoding)
+		{
+			free(self->current_client_encoding);
+			self->current_client_encoding = NULL;
+		}
+		if (self->server_encoding)
+		{
+			free(self->server_encoding);
+			self->server_encoding = NULL;
+		}
+		reset_current_schema(self);
 	}
-	if (self->current_client_encoding)
-	{
-		free(self->current_client_encoding);
-		self->current_client_encoding = NULL;
-	}
-	if (self->server_encoding)
-	{
-		free(self->server_encoding);
-		self->server_encoding = NULL;
-	}
-	reset_current_schema(self);
 	/* Free cached table info */
 	CC_clear_col_info(self, TRUE);
 	if (self->num_discardp > 0 && self->discardp)
@@ -692,6 +808,7 @@ CC_cleanup(ConnectionClass *self)
 		self->discardp = NULL;
 	}
 
+	LEAVE_CONN_CS(self);
 	mylog("exit CC_Cleanup\n");
 	return TRUE;
 }
@@ -747,10 +864,10 @@ md5_auth_send(ConnectionClass *self, const char *salt)
 	SocketClass	*sock = self->sock;
 	size_t		md5len;
 
-inolog("md5 pwd=%s user=%s salt=%02x%02x%02x%02x%02x\n", ci->password, ci->username, (UCHAR)salt[0], (UCHAR)salt[1], (UCHAR)salt[2], (UCHAR)salt[3], (UCHAR)salt[4]);
+inolog("md5 pwd=%s user=%s salt=%02x%02x%02x%02x%02x\n", PRINT_NAME(ci->password), ci->username, (UCHAR)salt[0], (UCHAR)salt[1], (UCHAR)salt[2], (UCHAR)salt[3], (UCHAR)salt[4]);
 	if (!(pwd1 = malloc(MD5_PASSWD_LEN + 1)))
 		return 1;
-	if (!EncryptMD5(ci->password, ci->username, strlen(ci->username), pwd1))
+	if (!EncryptMD5(SAFE_NAME(ci->password), ci->username, strlen(ci->username), pwd1))
 	{
 		free(pwd1);
 		return 1;
@@ -774,7 +891,7 @@ inolog("putting p and %s\n", pwd2);
 }
 	md5len = strlen(pwd2);
 	SOCK_put_int(sock, (Int4) (4 + md5len + 1), 4);
-	SOCK_put_n_char(sock, pwd2, (Int4) (md5len + 1));
+	SOCK_put_n_char(sock, pwd2, (md5len + 1));
 	SOCK_flush_output(sock);
 inolog("sockerr=%d\n", SOCK_get_errcode(sock));
 	free(pwd2);
@@ -842,11 +959,11 @@ handle_error_message(ConnectionClass *self, char *msgbuf, size_t buflen, char *s
 	}
 
 inolog("new_format=%d\n", new_format);
-	truncated = SOCK_get_string(sock, new_format ? msgbuffer : msgbuf, new_format ? sizeof(msgbuffer) : buflen);
+	truncated = SOCK_get_string(sock,
+								new_format ? msgbuffer : msgbuf,
+								new_format ? sizeof(msgbuffer) : (Int4) buflen);
 	if (new_format)
 	{
-		size_t	dstlen = 0;
-
 		msgbuf[0] = '\0';
 		for (;msgbuffer[0];)
 		{
@@ -856,13 +973,13 @@ inolog("new_format=%d\n", new_format);
 			{
 				case 'S':
 					strlcat(msgbuf, msgbuffer + 1, buflen);
-					dstlen = strlcat(msgbuf, ": ", buflen);
+					strlcat(msgbuf, ": ", buflen);
 					break;
 				case 'M':
 				case 'D':
 					if (hasmsg)
 						strlcat(msgbuf, "\n", buflen);
-					dstlen = strlcat(msgbuf, msgbuffer + 1, buflen);
+					strlcat(msgbuf, msgbuffer + 1, buflen);
 					if (truncated)
 						msg_truncated = truncated;
 					hasmsg = TRUE;
@@ -1022,6 +1139,10 @@ inolog("parameter name=%s\n", msgbuffer);
 		{
 			conn->escape_in_literal = '\0';
 		}
+		if (stricmp(msgbuffer, "off") == 0)
+		{
+			conn->escape_in_literal = ESCAPE_IN_LITERAL;
+		}
 	}
 	else if (stricmp(msgbuffer, "server_version") == 0)
 	{
@@ -1120,9 +1241,9 @@ mylog("!!! usrname=%s server=%s\n", usrname, ci->server);
 				opts[cnt] = "sslmode";
 				vals[cnt++] = ci->sslmode;
 		}
-		if (ci->password[0])
+		if (NAME_IS_VALID(ci->password))
 		{
-			opts[cnt] = "password";	vals[cnt++] = ci->password;
+			opts[cnt] = "password";	vals[cnt++] = SAFE_NAME(ci->password);
 		}
 		if (ci->gssauth_use_gssapi)
 		{
@@ -1202,7 +1323,7 @@ static int	protocol3_packet_build(ConnectionClass *self)
 	}
 	*ppacket = '\0';
 
-	SOCK_put_n_char(sock, packet, (Int4) slen);
+	SOCK_put_n_char(sock, packet, slen);
 	SOCK_flush_output(sock);
 	free(packet);
 
@@ -1341,7 +1462,7 @@ static char CC_initial_log(ConnectionClass *self, const char *func)
 		self->ccsc = pg_CS_code(self->original_client_encoding);
 	qlog("                extra_systable_prefixes='%s', conn_settings='%s' conn_encoding='%s'\n",
 		 ci->drivers.extra_systable_prefixes,
-		 ci->drivers.conn_settings,
+		 PRINT_NAME(ci->drivers.conn_settings),
 		 encoding ? encoding : "");
 	if (self->status != CONN_NOT_CONNECTED)
 	{
@@ -1349,15 +1470,23 @@ static char CC_initial_log(ConnectionClass *self, const char *func)
 		return 0;
 	}
 
-	mylog("%s: DSN = '%s', server = '%s', port = '%s', database = '%s', username = '%s', password='%s'\n", func, ci->dsn, ci->server, ci->port, ci->database, ci->username, ci->password ? "xxxxx" : "");
+	mylog("%s: DSN = '%s', server = '%s', port = '%s', database = '%s', username = '%s', password='%s'\n", func, ci->dsn, ci->server, ci->port, ci->database, ci->username, NAME_IS_VALID(ci->password) ? "xxxxx" : "");
 
-	if (ci->port[0] == '\0' ||
-#ifdef	WIN32
-	    ci->server[0] == '\0' ||
-#endif /* WIN32 */
-	    ci->database[0] == '\0')
+	if (ci->port[0] == '\0')
 	{
-		CC_set_error(self, CONN_INIREAD_ERROR, "Missing server name, port, or database name in call to CC_connect.", func);
+		CC_set_error(self, CONN_INIREAD_ERROR, "Missing port name in call to CC_connect.", func);
+		return 0;
+	}
+#ifdef	WIN32
+	if (ci->server[0] == '\0')
+	{
+		CC_set_error(self, CONN_INIREAD_ERROR, "Missing server name in call to CC_connect.", func);
+		return 0;
+	}
+#endif /* WIN32 */
+	if (ci->database[0] == '\0')
+	{
+		CC_set_error(self, CONN_INIREAD_ERROR, "Missing database name in call to CC_connect.", func);
 		return 0;
 	}
 
@@ -1438,6 +1567,7 @@ original_CC_connect(ConnectionClass *self, char password_req, char *salt_para)
 #ifdef	USE_SSPI
 	int	ssl_try_count, ssl_try_no;
 	char	ssl_call[2];
+	int	bReconnect = 0;
 #endif /* USE_SSPI */
 
 	mylog("%s: entering...\n", func);
@@ -1572,8 +1702,13 @@ inolog("protocol=%s version=%d,%d\n", ci->protocol, self->pg_version_major, self
 			switch (rnego)
 			{
 				case 'S':
-					if (!StartupSspiService(sock, SchannelService, NULL))
+					if (!StartupSspiService(sock, SchannelService, ci, &bReconnect))
 					{
+						if (bReconnect != 0)
+						{
+							anotherVersionRetry = TRUE;
+							goto another_version_retry;
+						}
 						CC_set_error(self, CONN_INVALID_AUTHENTICATION, "Service negotation failed", func);
 						goto error_proc;
 					}
@@ -1764,7 +1899,7 @@ inolog("Ekita retry=%d\n", retry);
 						case AUTH_REQ_PASSWORD:
 							mylog("in AUTH_REQ_PASSWORD\n");
 
-							if (ci->password[0] == '\0')
+							if (NAME_IS_NULL(ci->password))
 							{
 								CC_set_error(self, CONNECTION_NEED_PASSWORD, "A password is required for this connection.", func);
 								ret = -areq; /* need password */
@@ -1775,8 +1910,8 @@ inolog("Ekita retry=%d\n", retry);
 
 							if (PROTOCOL_74(&(self->connInfo)))
 								SOCK_put_char(sock, 'p');
-							SOCK_put_int(sock, (Int4) (4 + strlen(ci->password) + 1), 4);
-							SOCK_put_n_char(sock, ci->password, (Int4) strlen(ci->password) + 1);
+							SOCK_put_int(sock, (Int4) (4 + strlen(SAFE_NAME(ci->password)) + 1), 4);
+							SOCK_put_n_char(sock, SAFE_NAME(ci->password), strlen(SAFE_NAME(ci->password)) + 1);
 							sockerr = SOCK_flush_output(sock);
 
 							mylog("past flush %dbytes\n", sockerr);
@@ -1787,7 +1922,7 @@ inolog("Ekita retry=%d\n", retry);
 							goto error_proc;
 						case AUTH_REQ_MD5:
 							mylog("in AUTH_REQ_MD5\n");
-							if (ci->password[0] == '\0')
+							if (NAME_IS_NULL(ci->password))
 							{
 								CC_set_error(self, CONNECTION_NEED_PASSWORD, "A password is required for this connection.", func);
 								if (salt_para)
@@ -1812,7 +1947,7 @@ inolog("Ekita retry=%d\n", retry);
 							if (!ci->gssauth_use_gssapi)
 							{
 								self->auth_svcs = KerberosService;
-								authRet = StartupSspiService(sock, self->auth_svcs, MakePrincHint(ci, TRUE));
+								authRet = StartupSspiService(sock, self->auth_svcs, MakePrincHint(ci, TRUE), &bReconnect);
 								if (!authRet)
 								{
 									CC_set_error(self, CONN_INVALID_AUTHENTICATION, "Service negotation failed", func);
@@ -1873,7 +2008,7 @@ inolog("Ekita retry=%d\n", retry);
 							mylog("in AUTH_REQ_SSPI\n");
 #if	defined(USE_SSPI)
 							self->auth_svcs = ci->gssauth_use_gssapi ? KerberosService : NegotiateService;
-							if (!StartupSspiService(sock, self->auth_svcs, MakePrincHint(ci, TRUE)))
+							if (!StartupSspiService(sock, self->auth_svcs, MakePrincHint(ci, TRUE), &bReconnect))
 							{
 								CC_set_error(self, CONN_INVALID_AUTHENTICATION, "Service negotation failed", func);
 								goto error_proc;
@@ -2159,22 +2294,32 @@ CC_add_statement(ConnectionClass *self, StatementClass *stmt)
 
 	if (i >= self->num_stmts) /* no more room -- allocate more memory */
 	{
-		self->stmts = (StatementClass **) realloc(self->stmts, sizeof(StatementClass *) * (STMT_INCREMENT + self->num_stmts));
-		if (!self->stmts)
+		StatementClass **newstmts;
+		Int2 new_num_stmts;
+
+		new_num_stmts = STMT_INCREMENT + self->num_stmts;
+
+		if (new_num_stmts > 0)
+			newstmts = (StatementClass **)
+				realloc(self->stmts, sizeof(StatementClass *) * new_num_stmts);
+		else
+			newstmts = NULL; /* num_stmts overflowed */
+		if (!newstmts)
 			ret = FALSE;
 		else
 		{
+			self->stmts = newstmts;
 			memset(&self->stmts[self->num_stmts], 0, sizeof(StatementClass *) * STMT_INCREMENT);
 
 			stmt->hdbc = self;
 			self->stmts[self->num_stmts] = stmt;
 
-			self->num_stmts += STMT_INCREMENT;
+			self->num_stmts = new_num_stmts;
 		}
 	}
 	CONNLOCK_RELEASE(self);
 
-	return TRUE;
+	return ret;
 }
 
 static void
@@ -2378,7 +2523,7 @@ static void CC_clear_cursors(ConnectionClass *self, BOOL on_abort)
 			 * all non-permanent cursors are automatically closed
 			 * at rollback time.
 			 */	
-				QR_set_cursor(res, NULL);
+				QR_on_close_cursor(res);
 			else if (!QR_is_permanent(res))
 			{
 				QResultClass	*wres;
@@ -2596,8 +2741,7 @@ CC_send_query_append(ConnectionClass *self, const char *query, QueryInfo *qi, UD
 	SocketClass *sock = self->sock;
 	int			maxlen,
 				empty_reqs;
-	BOOL		msg_truncated,
-				ReadyToReturn = FALSE,
+	BOOL		ReadyToReturn = FALSE,
 				query_completed = FALSE,
 				beforeV2 = PG_VERSION_LT(self, 6.4),
 				aborted = FALSE,
@@ -2636,12 +2780,14 @@ CC_send_query_append(ConnectionClass *self, const char *query, QueryInfo *qi, UD
 		return NULL;
 	}
 
+	ENTER_INNER_CONN_CS(self, func_cs_count);
 	/* Finish the pending extended query first */
 	if (!SyncParseRequest(self))
 	{
 		if (CC_get_errornumber(self) <= 0)
 		{
 			CC_set_error(self, CONN_EXEC_ERROR, "error occured while calling SyncParseRequest() in CC_send_query_append()", func);
+			CLEANUP_FUNC_CONN_CS(func_cs_count, self);
 			return NULL;
 		}
 	}
@@ -2651,16 +2797,21 @@ CC_send_query_append(ConnectionClass *self, const char *query, QueryInfo *qi, UD
 	if (maxlen > 0 && maxlen < (int) qrylen + 1)
 	{
 		CC_set_error(self, CONNECTION_MSG_TOO_LONG, "Query string is too long", func);
+		CLEANUP_FUNC_CONN_CS(func_cs_count, self);
 		return NULL;
 	}
 
 	if ((NULL == query) || (query[0] == '\0'))
+	{
+		CLEANUP_FUNC_CONN_CS(func_cs_count, self);
 		return NULL;
+	}
 
 	if (SOCK_get_errcode(sock) != 0)
 	{
 		CC_set_error(self, CONNECTION_COULD_NOT_SEND, "Could not send Query to backend", func);
 		CC_on_abort(self, CONN_DEAD);
+		CLEANUP_FUNC_CONN_CS(func_cs_count, self);
 		return NULL;
 	}
 
@@ -2683,13 +2834,13 @@ CC_send_query_append(ConnectionClass *self, const char *query, QueryInfo *qi, UD
 				res = cmdres;
 			}
 		}
+		CLEANUP_FUNC_CONN_CS(func_cs_count, self);
 		return res;
 	}
 
 	rollback_on_error = (flag & ROLLBACK_ON_ERROR) != 0;
 	end_with_commit = (flag & END_WITH_COMMIT) != 0;
 #define	return DONT_CALL_RETURN_FROM_HERE???
-	ENTER_INNER_CONN_CS(self, func_cs_count);
 	consider_rollback = (issue_begin || (CC_is_in_trans(self) && !CC_is_in_error_trans(self)) || strnicmp(query, "begin", 5) == 0);
 	if (rollback_on_error)
 		rollback_on_error = consider_rollback;
@@ -2754,7 +2905,7 @@ inolog("leng=%d\n", leng);
 		char cmd[64];
 
 		snprintf(cmd, sizeof(cmd), "%s %s;", svpcmd, per_query_svp);
-		SOCK_put_n_char(sock, cmd, (Int4) strlen(cmd));
+		SOCK_put_n_char(sock, cmd, strlen(cmd));
 		discard_next_savepoint = TRUE;
 	}
 	SOCK_put_n_char(sock, query, qrylen);
@@ -2768,7 +2919,7 @@ inolog("leng=%d\n", leng);
 		char cmd[64];
 
 		snprintf(cmd, sizeof(cmd), ";%s %s", rlscmd, per_query_svp);
-		SOCK_put_n_char(sock, cmd, (Int4) strlen(cmd));
+		SOCK_put_n_char(sock, cmd, strlen(cmd));
 	}
 	SOCK_put_n_char(sock, NULL_STRING, 1);
 	leng = SOCK_flush_output(sock);
@@ -2851,7 +3002,7 @@ inolog("send_query response_length=%d\n", response_length);
 					if (strnicmp(cmdbuffer, bgncmd, lenbgncmd) == 0)
 					{
 						CC_set_in_trans(self);
-						if (discard_next_begin) /* disicard the automatically issued BEGIN */
+						if (discard_next_begin) /* discard the automatically issued BEGIN */
 						{
 							discard_next_begin = FALSE;
 							continue; /* discard the result */
@@ -2945,7 +3096,7 @@ inolog("Discarded the first SAVEPOINT\n");
 				EatReadyForQuery(self);
 				break;
 			case 'N':			/* NOTICE: */
-				msg_truncated = handle_notice_message(self, cmdbuffer, sizeof(cmdbuffer), res->sqlstate, "send_query", res);
+				handle_notice_message(self, cmdbuffer, sizeof(cmdbuffer), res->sqlstate, "send_query", res);
 				break;		/* dont return a result -- continue
 								 * reading */
 
@@ -2978,7 +3129,7 @@ inolog("Discarded the first SAVEPOINT\n");
 					query_completed = TRUE;
 				break;
 			case 'E':
-				msg_truncated = handle_error_message(self, msgbuffer, sizeof(msgbuffer), res->sqlstate, "send_query", res);
+				handle_error_message(self, msgbuffer, sizeof(msgbuffer), res->sqlstate, "send_query", res);
 
 				/* We should report that an error occured. Zoltan */
 				aborted = TRUE;
@@ -3270,7 +3421,6 @@ CC_send_function(ConnectionClass *self, int fnid, void *result_buf, int *actual_
 {
 	CSTR	func = "CC_send_function";
 	char		id,
-				c,
 				done;
 	SocketClass *sock = self->sock;
 
@@ -3415,7 +3565,7 @@ inolog("send_func response_length=%d\n", response_length);
 				}
 				if (beforeV3)
 				{
-					c = SOCK_get_char(sock); /* get the last '0' */
+					SOCK_get_char(sock); /* get the last '0' */
 					if (beforeV2)
 						done = TRUE;
 					resultResponse = FALSE;
@@ -3581,59 +3731,66 @@ CC_send_settings(ConnectionClass *self)
 	stmt->internal = TRUE;		/* ensure no BEGIN/COMMIT/ABORT stuff */
 
 	/* Global settings */
-	if (ci->drivers.conn_settings[0] != '\0')
+	if (NAME_IS_VALID(ci->drivers.conn_settings))
 	{
-		cs = strdup(ci->drivers.conn_settings);
-#ifdef	HAVE_STRTOK_R
-		ptr = strtok_r(cs, semi_colon, &last);
-#else
-		ptr = strtok(cs, semi_colon);
-#endif /* HAVE_STRTOK_R */
-		while (ptr)
+		cs = strdup(GET_NAME(ci->drivers.conn_settings));
+		if (cs)
 		{
-			result = PGAPI_ExecDirect(hstmt, ptr, SQL_NTS, 0);
-			if (!SQL_SUCCEEDED(result))
-				status = FALSE;
+#ifdef	HAVE_STRTOK_R
+			ptr = strtok_r(cs, semi_colon, &last);
+#else
+			ptr = strtok(cs, semi_colon);
+#endif /* HAVE_STRTOK_R */
+			while (ptr)
+			{
+				result = PGAPI_ExecDirect(hstmt, ptr, SQL_NTS, 0);
+				if (!SQL_SUCCEEDED(result))
+					status = FALSE;
 
-			mylog("%s: result %d, status %d from '%s'\n", func, result, status, ptr);
+				mylog("%s: result %d, status %d from '%s'\n", func, result, status, ptr);
 
 #ifdef	HAVE_STRTOK_R
-			ptr = strtok_r(NULL, semi_colon, &last);
+				ptr = strtok_r(NULL, semi_colon, &last);
 #else
-			ptr = strtok(NULL, semi_colon);
+				ptr = strtok(NULL, semi_colon);
 #endif /* HAVE_STRTOK_R */
+			}
+			free(cs);
 		}
-
-		free(cs);
+		else
+			status = FALSE;
 	}
 
 	/* Per Datasource settings */
-	if (ci->conn_settings[0] != '\0')
+	if (NAME_IS_VALID(ci->conn_settings))
 	{
-		cs = strdup(ci->conn_settings);
-#ifdef	HAVE_STRTOK_R
-		ptr = strtok_r(cs, semi_colon, &last);
-#else
-		ptr = strtok(cs, semi_colon);
-#endif /* HAVE_STRTOK_R */
-		while (ptr)
+		cs = strdup(GET_NAME(ci->conn_settings));
+		if (cs)
 		{
-			result = PGAPI_ExecDirect(hstmt, ptr, SQL_NTS, 0);
-			if (!SQL_SUCCEEDED(result))
-				status = FALSE;
+#ifdef	HAVE_STRTOK_R
+			ptr = strtok_r(cs, semi_colon, &last);
+#else
+			ptr = strtok(cs, semi_colon);
+#endif /* HAVE_STRTOK_R */
+			while (ptr)
+			{
+				result = PGAPI_ExecDirect(hstmt, ptr, SQL_NTS, 0);
+				if (!SQL_SUCCEEDED(result))
+					status = FALSE;
 
-			mylog("%s: result %d, status %d from '%s'\n", func, result, status, ptr);
+				mylog("%s: result %d, status %d from '%s'\n", func, result, status, ptr);
 
 #ifdef	HAVE_STRTOK_R
-			ptr = strtok_r(NULL, semi_colon, &last);
+				ptr = strtok_r(NULL, semi_colon, &last);
 #else
-			ptr = strtok(NULL, semi_colon);
+				ptr = strtok(NULL, semi_colon);
 #endif /* HAVE_STRTOK_R */
+			}
+			free(cs);
 		}
-
-		free(cs);
+		else
+			status = FALSE;
 	}
-
 
 	PGAPI_FreeStmt(hstmt, SQL_DROP);
 
@@ -3723,7 +3880,6 @@ static void
 CC_lookup_pg_version(ConnectionClass *self)
 {
 	HSTMT		hstmt;
-	StatementClass *stmt;
 	RETCODE		result;
 	char		szVersion[32];
 	int			major,
@@ -3739,7 +3895,6 @@ CC_lookup_pg_version(ConnectionClass *self)
 	result = PGAPI_AllocStmt(self, &hstmt, 0);
 	if (!SQL_SUCCEEDED(result))
 		return;
-	stmt = (StatementClass *) hstmt;
 
 	/* get the server's version if possible	 */
 	result = PGAPI_ExecDirect(hstmt, "select version()", SQL_NTS, 0);
@@ -4175,3 +4330,353 @@ const char *CurrCatString(const ConnectionClass *conn)
 		cat = NULL_STRING;
 	return cat;
 }
+
+#ifdef	_HANDLE_ENLIST_IN_DTC_
+	/*
+	 *	Export the following functions so that the pgenlist dll
+	 *	can handle ConnectionClass objects as opaque ones.
+	 */
+
+#define	_PGDTC_FUNCS_IMPLEMENT_
+#include "connexp.h"
+
+#define	SYNC_AUTOCOMMIT(conn)	(SQL_AUTOCOMMIT_OFF != conn->connInfo.autocommit_public ? (conn->transact_status |= CONN_IN_AUTOCOMMIT) : (conn->transact_status &= ~CONN_IN_AUTOCOMMIT))
+
+DLL_DECLARE void PgDtc_create_connect_string(void *self, char *connstr, int strsize)
+{
+	ConnectionClass	*conn = (ConnectionClass *) self;
+	
+	ConnInfo *ci = &(conn->connInfo);
+	snprintf(connstr, strsize, "DRIVER={%s};SERVER=%s;PORT=%s;DATABASE=%s;UID=%s;PWD=%s;" ABBR_SSLMODE "=%s", 
+		ci->drivername, ci->server, ci->port, ci->database, ci->username, SAFE_NAME(ci->password), ci->sslmode);
+}
+
+DLL_DECLARE void PgDtc_set_async(void *self, void *async)
+{
+	ConnectionClass	*conn = (ConnectionClass *) self;
+
+	if (!conn)	return;
+	CONNLOCK_ACQUIRE(conn);
+	if (NULL != async)
+		CC_set_autocommit(conn, FALSE);
+	else
+		SYNC_AUTOCOMMIT(conn);
+	conn->asdum = async;
+	CONNLOCK_RELEASE(conn);
+}
+
+DLL_DECLARE void	*PgDtc_get_async(void *self)
+{
+	ConnectionClass *conn = (ConnectionClass *) self;
+
+	return conn->asdum;
+}
+
+DLL_DECLARE void PgDtc_set_property(void *self, int property, void *value)
+{
+	ConnectionClass *conn = (ConnectionClass *) self;
+
+	CONNLOCK_ACQUIRE(conn);
+	switch (property)
+	{
+		case inprogress:
+			if (NULL != value)
+				CC_set_dtc_executing(conn);
+			else
+				CC_no_dtc_executing(conn);
+			break;
+		case enlisted:
+			if (NULL != value)
+				CC_set_dtc_enlisted(conn);
+			else
+				CC_no_dtc_enlisted(conn);
+			break;
+		case prepareRequested:
+			if (NULL != value)
+				CC_set_dtc_prepareRequested(conn);
+			else
+				CC_no_dtc_prepareRequested(conn);
+			break;
+	}
+	CONNLOCK_RELEASE(conn);
+}
+
+DLL_DECLARE void PgDtc_set_error(void *self, const char *message, const char *func)
+{
+	ConnectionClass *conn = (ConnectionClass *) self;
+
+	CC_set_error(conn, CONN_UNSUPPORTED_OPTION, message, func);
+}
+
+DLL_DECLARE int PgDtc_get_property(void *self, int property)
+{
+	ConnectionClass *conn = (ConnectionClass *) self;
+	int	ret;
+
+	CONNLOCK_ACQUIRE(conn);
+	switch (property)
+	{
+		case inprogress:
+			ret = CC_is_dtc_executing(conn);
+			break;
+		case enlisted:
+			ret = CC_is_dtc_enlisted(conn);
+			break;
+		case inTrans:
+			ret = CC_is_in_trans(conn);
+			break;
+		case errorNumber:
+			ret = CC_get_errornumber(conn);
+			break;
+		case idleInGlobalTransaction:
+			ret = CC_is_idle_in_global_transaction(conn);
+			break;
+		case connected:
+			ret = (CONN_CONNECTED == conn->status);
+			break;
+		case prepareRequested:
+			ret = CC_is_dtc_prepareRequested(conn);
+			break;
+	}
+	CONNLOCK_RELEASE(conn);
+	return ret;
+}
+
+DLL_DECLARE BOOL PgDtc_connect(void *self)
+{
+	CSTR	func = "PgDtc_connect";
+	ConnectionClass *conn = (ConnectionClass *) self;
+
+	if (CONN_CONNECTED == conn->status)
+		return TRUE;
+	if (CC_connect(conn, AUTH_REQ_OK, NULL) <= 0)
+	{
+		/* Error messages are filled in */
+		CC_log_error(func, "Error on CC_connect", conn);
+		return FALSE;
+	}
+	return TRUE;
+}
+
+DLL_DECLARE void PgDtc_free_connect(void *self)
+{
+	ConnectionClass *conn = (ConnectionClass *) self;
+
+	PGAPI_FreeConnect(conn);
+}
+
+DLL_DECLARE BOOL PgDtc_one_phase_operation(void *self, int operation)
+{
+	ConnectionClass *conn = (ConnectionClass *) self;
+	BOOL	ret, is_in_progress = CC_is_dtc_executing(conn);
+
+	if (!is_in_progress)
+		CC_set_dtc_executing(conn);
+	switch (operation)
+	{
+		case ONE_PHASE_COMMIT:
+			ret = CC_commit(conn);
+			break;
+		default:
+			ret = CC_abort(conn);
+			break;
+	}
+
+	if (!is_in_progress)
+		CC_no_dtc_executing(conn);
+
+	return ret;
+}
+
+DLL_DECLARE BOOL
+PgDtc_two_phase_operation(void *self, int operation, const char *gxid)
+{
+	ConnectionClass *conn = (ConnectionClass *) self;
+	QResultClass	*qres;
+	BOOL	ret = TRUE;
+	char		cmd[512];
+
+	switch (operation)
+	{
+		case PREPARE_TRANSACTION:
+			snprintf(cmd, sizeof(cmd), "PREPARE TRANSACTION '%s'", gxid);
+			break;
+		case COMMIT_PREPARED:
+			snprintf(cmd, sizeof(cmd), "COMMIT PREPARED '%s'", gxid);
+			break;
+		case ROLLBACK_PREPARED:
+			snprintf(cmd, sizeof(cmd), "ROLLBACK PREPARED '%s'", gxid);
+			break;
+	}	
+
+	qres = CC_send_query(conn, cmd, NULL, 0, NULL);
+	if (!QR_command_maybe_successful(qres))
+		ret = FALSE;
+	QR_Destructor(qres);
+	return ret;
+}
+
+DLL_DECLARE BOOL
+PgDtc_lock_cntrl(void *self, BOOL acquire, BOOL bTrial)
+{
+	ConnectionClass *conn = (ConnectionClass *) self;
+	BOOL	ret = TRUE;
+
+	if (acquire)
+		if (bTrial)
+			ret = TRY_ENTER_CONN_CS(conn); 
+		else
+			ENTER_CONN_CS(conn);
+	else
+		LEAVE_CONN_CS(conn);
+
+	return ret;
+}
+
+static ConnectionClass *
+CC_Copy(const ConnectionClass *conn)
+{
+	ConnectionClass	*newconn = CC_alloc();
+
+	if (newconn)
+	{
+		memcpy(newconn, conn, sizeof(ConnectionClass));
+		CC_lockinit(newconn);
+	}
+	return newconn;
+}
+
+#define	CLEANUP_CONN_BEFORE_ISOLATION
+DLL_DECLARE void *
+PgDtc_isolate(void *self, DWORD option)
+{
+	BOOL	disposingConn = (0 != (disposingConnection & option));
+	ConnectionClass *sconn = (ConnectionClass *) self, *newconn = NULL;
+#ifndef	CLEANUP_CONN_BEFORE_ISOLATION
+	int		i;
+#endif /* CLEANUP_CONN_BEFORE_ISOLATION */
+
+#ifdef	CLEANUP_CONN_BEFORE_ISOLATION
+	if (0 == (useAnotherRoom & option))
+#else
+	if (disposingConn)
+#endif /* CLEANUP_CONN_BEFORE_ISOLATION */
+	{
+		HENV	henv = sconn->henv;
+
+#ifdef	CLEANUP_CONN_BEFORE_ISOLATION
+		CC_cleanup(sconn, TRUE);
+#endif /* CLEANUP_CONN_BEFORE_ISOLATION */
+		if (newconn = CC_Copy(sconn), NULL == newconn)
+			return newconn;
+		mylog("%s:newconn=%p from %p\n", __FUNCTION__, newconn, sconn);
+		CC_initialize(sconn, FALSE); 
+#ifdef	CLEANUP_CONN_BEFORE_ISOLATION
+		if (!disposingConn)
+			CC_copy_conninfo(&sconn->connInfo, &newconn->connInfo);
+#endif /* CLEANUP_CONN_BEFORE_ISOLATION */
+		sconn->henv = newconn->henv;
+		newconn->henv = NULL;
+		SYNC_AUTOCOMMIT(sconn);
+#ifndef	CLEANUP_CONN_BEFORE_ISOLATION
+		for (i = 0; i < newconn->num_stmts; i++)
+		{
+			StatementClass	*stmt;
+			if (stmt = newconn->stmts[i], NULL != stmt)
+				SC_get_conn(stmt) = newconn;
+		}
+#if (ODBCVER >= 0x0300)
+		for (i = 0; i < newconn->num_descs; i++)
+		{
+			DescriptorClass	*desc;
+			if (desc = newconn->descs[i], NULL != desc)
+				DC_get_conn(desc) = newconn;
+		}
+#endif /* ODBCVER */
+#endif /* CLEANUP_CONN_BEFORE_ISOLATION */
+		return newconn;
+	} 
+	newconn = CC_Constructor();
+	CC_copy_conninfo(&newconn->connInfo, &sconn->connInfo);
+	newconn->asdum = sconn->asdum;
+	newconn->gTranInfo = sconn->gTranInfo;
+	CC_set_dtc_isolated(newconn);
+	sconn->asdum = NULL;
+	SYNC_AUTOCOMMIT(sconn);
+	CC_set_dtc_clear(sconn);
+	if (0 != (useAnotherRoom & option))
+	{
+		mylog("generated connection=%p with %p\n", newconn, newconn->asdum);
+		return newconn;
+	}
+
+#ifndef	CLEANUP_CONN_BEFORE_ISOLATION
+	newconn->sock = sconn->sock;
+	sconn->sock = NULL;
+	mylog("Isolated connection=%p(status %d) with %p\n", newconn, sconn->status, sconn->asdum);
+	newconn->__error_number = sconn->__error_number;
+	sconn->__error_number = 0;
+	newconn->__error_message = sconn->__error_message;
+	sconn->__error_message = NULL;
+	newconn->errormsg_created = sconn->errormsg_created;
+	sconn->errormsg_created = FALSE;
+	strcpy(newconn->sqlstate, sconn->sqlstate);
+	sconn->sqlstate[0] = '\0'; 
+	// newconn->ardOptions = sconn->ardOptions;
+	// newconn->apdOptions = sconn->apdOptions;
+	newconn->status = sconn->status;
+	sconn->status = CONN_NOT_CONNECTED;
+	/* Cursors are no longer available */ 
+	for (i = 0; i < sconn->num_stmts; i++)
+	{
+		StatementClass	*stmt;
+		QResultClass	*res;
+	
+		stmt = sconn->stmts[i];
+		if (stmt && (res = SC_get_Result(stmt)) &&
+			 (NULL != QR_get_cursor(res)))
+			QR_set_cursor(res, NULL);
+	}
+	sconn->ncursors = 0;
+	newconn->lobj_type = sconn->lobj_type;
+	newconn->driver_version = sconn->driver_version;
+	newconn->transact_status = sconn->transact_status & (CONN_IN_TRANSACTION  
+| CONN_IN_ERROR_BEFORE_IDLE);
+	sconn->transact_status = 0;
+	strcpy(newconn->pg_version, sconn->pg_version);
+	newconn->pg_version_number = sconn->pg_version_number;
+	newconn->pg_version_major = sconn->pg_version_major;
+	newconn->pg_version_minor = sconn->pg_version_minor;
+	newconn->ms_jet = sconn->ms_jet;
+	newconn->unicode = sconn->unicode;
+	newconn->schema_support = sconn->schema_support;
+	newconn->lo_is_domain = sconn->lo_is_domain;
+	newconn->escape_in_literal = sconn->escape_in_literal;
+	newconn->original_client_encoding = sconn->original_client_encoding;
+	sconn->original_client_encoding = NULL;
+	newconn->current_client_encoding = sconn->current_client_encoding;
+	sconn->current_client_encoding = NULL;
+	newconn->server_encoding = sconn->server_encoding;
+	sconn->server_encoding = NULL;
+	newconn->ccsc = sconn->ccsc;
+	newconn->mb_maxbyte_per_char = sconn->mb_maxbyte_per_char;
+	newconn->be_pid = sconn->be_pid;
+	sconn->be_pid = 0;
+	newconn->isolation = sconn->isolation;
+	newconn->current_schema = sconn->current_schema;
+	sconn->current_schema = NULL;
+	newconn->max_identifier_length = sconn->max_identifier_length;
+	newconn->num_discardp = sconn->num_discardp;
+	newconn->discardp = sconn->discardp;
+	sconn->num_discardp = 0;
+	sconn->discardp = NULL;
+#ifdef	USE_SSPI
+	newconn->svcs_allowed = sconn->svcs_allowed;
+	sconn->svcs_allowed = 0;
+#endif /* USE_SSPI */
+#endif /* CLEANUP_CONN_BEFORE_ISOLATION */
+
+	return newconn;
+}
+
+#endif /* _HANDLE_ENLIST_IN_DTC_ */

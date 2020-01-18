@@ -2,7 +2,7 @@
  *
  * Description:		See "socket.c"
  *
- * Comments:		See "notice.txt" for copyright and license information.
+ * Comments:		See "readme.txt" for copyright and license information.
  *
  */
 
@@ -17,9 +17,9 @@
 #include <gssapi/gssapi.h>
 #endif
 #endif
-#include <errno.h>
 
 #ifndef WIN32
+#include <errno.h>
 #define	WSAAPI
 #ifdef	HAVE_POLL
 #include <poll.h>
@@ -96,6 +96,9 @@ struct addrinfo
 #define SOCKETFD SOCKET
 #define SOCK_ERRNO		(WSAGetLastError())
 #define SOCK_ERRNO_SET(e)	WSASetLastError(e)
+#ifndef	EINTR
+#define	EINTR	WSAEINTR
+#endif /* EINTR */
 #ifndef	EWOULDBLOCK
 #define	EWOULDBLOCK	WSAEWOULDBLOCK
 #endif /* EWOULDBLOCK */
@@ -108,12 +111,10 @@ struct addrinfo
 #endif /* WIN32 */
 typedef void (WSAAPI *freeaddrinfo_func) (struct addrinfo *); 
 typedef int (WSAAPI *getaddrinfo_func) (const char *, const char *,
-#ifndef	__CYGWIN__
-	const
-#endif
-	struct addrinfo *, struct addrinfo **); 
+	const struct addrinfo *, struct addrinfo **); 
 typedef int (WSAAPI *getnameinfo_func) (const struct sockaddr *,
 	socklen_t, char *, size_t, char *, size_t, int);
+typedef int (WSAAPI *inet_pton_func) (int, const char *, void *);
 
 #ifdef	MSG_NOSIGNAL
 #define	SEND_FLAG MSG_NOSIGNAL
@@ -224,7 +225,7 @@ void		SOCK_Destructor(SocketClass *self);
 char		SOCK_connect_to(SocketClass *self, unsigned short port, char *hostname, long timeout);
 int		SOCK_get_id(SocketClass *self);
 void		SOCK_get_n_char(SocketClass *self, char *buffer, Int4 len);
-void		SOCK_put_n_char(SocketClass *self, const char *buffer, Int4 len);
+void		SOCK_put_n_char(SocketClass *self, const char *buffer, size_t len);
 BOOL		SOCK_get_string(SocketClass *self, char *buffer, Int4 bufsize);
 void		SOCK_put_string(SocketClass *self, const char *string);
 int		SOCK_get_int(SocketClass *self, short len);
@@ -233,7 +234,5 @@ Int4		SOCK_flush_output(SocketClass *self);
 UCHAR		SOCK_get_next_byte(SocketClass *self, BOOL peek);
 void		SOCK_put_next_byte(SocketClass *self, UCHAR next_byte);
 Int4		SOCK_get_response_length(SocketClass *self);
-void		SOCK_clear_error(SocketClass *self);
-UInt4		SOCK_skip_n_bytes(SocketClass *self, UInt4 skip_length);
 
 #endif /* __SOCKET_H__ */

@@ -2,7 +2,7 @@
  *
  * Description:		See "dlg_specific.c"
  *
- * Comments:		See "notice.txt" for copyright and license information.
+ * Comments:		See "readme.txt" for copyright and license information.
  *
  */
 
@@ -242,7 +242,7 @@ const char *GetXaLibPath();
 #endif	/* WIN32 */
 #define DEFAULT_INT8AS			0
 #define DEFAULT_BYTEAASLONGVARBINARY	0
-#define DEFAULT_USESERVERSIDEPREPARE	0
+#define DEFAULT_USESERVERSIDEPREPARE	1
 #define DEFAULT_LOWERCASEIDENTIFIER	0
 #define DEFAULT_SSLMODE			SSLMODE_DISABLE
 #define DEFAULT_GSSAUTHUSEGSSAPI	0
@@ -296,7 +296,7 @@ int     changeDriverNameOfaDSN(const char *dsn, const char *driver_name, DWORD *
 UInt4	getExtraOptions(const ConnInfo *);
 BOOL	setExtraOptions(ConnInfo *, const char *str, const char *format);
 char	*extract_attribute_setting(const char *str, const char *attr, BOOL ref_comment);
-char	*extract_extra_attribute_setting(const char *str, const char *attr);
+char	*extract_extra_attribute_setting(const pgNAME setting, const char *attr);
 
 #ifdef	__cplusplus
 }

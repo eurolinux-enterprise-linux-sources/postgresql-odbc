@@ -38,18 +38,26 @@ CFG=Release
 !ENDIF 
 
 #
+#	Please replace the default options from the commandline if necessary 
 #
-!IF "$(PG_INC)" == ""
-PG_INC=$(PROGRAMFILES)\PostgreSQL\9.1\include
+!IFNDEF	CUSTOMCLOPT
+CUSTOMCLOPT=/nologo /W3 /wd4018
+!ELSE
+!MESSAGE CL option $(CUSTOMCLOPT) specified
+!ENDIF
+
+#
+!IFNDEF PG_INC
+PG_INC=$(PROGRAMFILES)\PostgreSQL\9.3\include
 !MESSAGE Using default PostgreSQL Include directory: $(PG_INC)
 !ENDIF
 
-!IF "$(PG_LIB)" == ""
-PG_LIB=$(PROGRAMFILES)\PostgreSQL\9.1\lib
+!IFNDEF PG_LIB
+PG_LIB=$(PROGRAMFILES)\PostgreSQL\9.3\lib
 !MESSAGE Using default PostgreSQL Library directory: $(PG_LIB)
 !ENDIF
 
-!IF "$(LINKMT)" == ""
+!IFNDEF LINKMT
 LINKMT=MT
 !ENDIF
 !IF "$(LINKMT)" == "MT"
@@ -58,12 +66,12 @@ LINKMT=MT
 !MESSAGE Linking dynamic Multithread library
 !ENDIF
 
-!IF "$(SSL_INC)" == ""
+!IFNDEF SSL_INC
 SSL_INC=C:\OpenSSL\include
 !MESSAGE Using default OpenSSL Include directory: $(SSL_INC)
 !ENDIF
 
-!IF "$(SSL_LIB)" == ""
+!IFNDEF SSL_LIB
 SSL_LIB=C:\OpenSSL\lib\VC
 !MESSAGE Using default OpenSSL Library directory: $(SSL_LIB)
 !ENDIF
@@ -125,6 +133,13 @@ RSC_DEFINES = $(RSC_DEFINES) /D "UNICODE_SUPPORT"
 !IF "$(PORTCHECK_64BIT)" == "yes"
 # ADD_DEFINES = $(ADD_DEFINES) /Wp64
 ADD_DEFINES = $(ADD_DEFINES) /D _WIN64
+!ENDIF
+
+!IF "$(PG_INC)" != ""
+INC_OPT=$(INC_OPT) /I "$(PG_INC)"
+!ENDIF
+!IF "$(SSL_INC)" != ""
+INC_OPT=$(INC_OPT) /I "$(SSL_INC)"
 !ENDIF
 
 !IF "$(OS)" == "Windows_NT"
@@ -208,11 +223,11 @@ $(INTDIR)\connection.obj $(INTDIR)\psqlodbc.res: version.h
 
 CPP=cl.exe
 !IF  "$(CFG)" == "Release"
-CPP_PROJ=/nologo /$(LINKMT) /O2 /D "NDEBUG"
+CPP_PROJ=/$(LINKMT) /O2 /D "NDEBUG"
 !ELSEIF  "$(CFG)" == "Debug"
-CPP_PROJ=/nologo /$(LINKMT)d /Gm /ZI /Od /RTC1 /D "_DEBUG"
+CPP_PROJ=/$(LINKMT)d /Gm /ZI /Od /RTC1 /D "_DEBUG"
 !ENDIF
-CPP_PROJ=$(CPP_PROJ) /W3 $(VC_FLAGS) /I "$(PG_INC)" /I "$(SSL_INC)" /D "WIN32" /D "_WINDOWS" /D "_MBCS" /D "_USRDLL" /D "_CRT_SECURE_NO_DEPRECATE" /D "PSQLODBC_EXPORTS" /D "WIN_MULTITHREAD_SUPPORT" $(ADD_DEFINES) /Fp"$(INTDIR)\psqlodbc.pch" /Fo"$(INTDIR)"\ /Fd"$(INTDIR)"\ /FD
+CPP_PROJ=$(CPP_PROJ) $(CUSTOMCLOPT) $(VC_FLAGS) $(INC_OPT) /D "WIN32" /D "_WINDOWS" /D "_MBCS" /D "_USRDLL" /D "_CRT_SECURE_NO_DEPRECATE" /D "PSQLODBC_EXPORTS" /D "WIN_MULTITHREAD_SUPPORT" $(ADD_DEFINES) /Fp"$(INTDIR)\psqlodbc.pch" /Fo"$(INTDIR)"\ /Fd"$(INTDIR)"\ /FD
 !MESSAGE CPP_PROJ=$(CPP_PROJ)
 .c{$(INTDIR)}.obj::
    $(CPP) @<<
@@ -275,7 +290,13 @@ LINK32_FLAGS=$(LINK32_FLAGS) /incremental:no
 !ELSE
 LINK32_FLAGS=$(LINK32_FLAGS) /incremental:yes /debug
 !ENDIF
-LINK32_FLAGS=$(LINK32_FLAGS) $(VC07_DELAY_LOAD) /libpath:"$(PG_LIB)" /libpath:"$(SSL_LIB)"
+LINK32_FLAGS=$(LINK32_FLAGS) $(VC07_DELAY_LOAD)
+!IF "$(PG_LIB)" != ""
+LINK32_FLAGS=$(LINK32_FLAGS) /libpath:"$(PG_LIB)"
+!ENDIF
+!IF "$(SSL_LIB)" != ""
+LINK32_FLAGS=$(LINK32_FLAGS) /libpath:"$(SSL_LIB)"
+!ENDIF
 
 LINK32_OBJS= \
 	"$(INTDIR)\bind.obj" \

@@ -12,7 +12,7 @@
  *
  * API functions:	none
  *
- * Comments:		See "notice.txt" for copyright and license information.
+ * Comments:		See "readme.txt" for copyright and license information.
  *---------
  */
 
@@ -38,7 +38,7 @@ QR_set_num_fields(QResultClass *self, int new_num_fields)
 	if (!self)	return;
 	mylog("in QR_set_num_fields\n");
 
-	CI_set_num_fields(self->fields, new_num_fields, allocrelatt);
+	CI_set_num_fields(QR_get_fields(self), new_num_fields, allocrelatt);
 
 	mylog("exit QR_set_num_fields\n");
 }
@@ -71,6 +71,9 @@ QR_set_cursor(QResultClass *self, const char *name)
 
 	if (self->cursor_name)
 	{
+		if (name &&
+		    0 == strcmp(name, self->cursor_name))
+			return;
 		free(self->cursor_name);
 		if (conn)
 		{
@@ -79,8 +82,11 @@ QR_set_cursor(QResultClass *self, const char *name)
 			CONNLOCK_RELEASE(conn);
 		}
 		self->cursTuple = -1;
-		self->pstatus = 0;
+		QR_set_no_cursor(self);
+		QR_set_no_fetching_tuples(self);
 	}
+	else if (NULL == name)
+		return;
 	if (name)
 	{
 		self->cursor_name = strdup(name);
@@ -102,7 +108,6 @@ QR_set_cursor(QResultClass *self, const char *name)
 				free(res->cursor_name);
 			res->cursor_name = NULL;
 		}
-		QR_set_no_cursor(self);
 	}
 }
 
@@ -133,6 +138,29 @@ QR_inc_rowstart_in_cache(QResultClass *self, SQLLEN base_inc)
 		self->key_base = self->base;
 }
 
+void
+QR_set_fields(QResultClass *self, ColumnInfoClass *fields)
+{
+	ColumnInfoClass	*curfields = QR_get_fields(self);
+
+	if (curfields == fields)
+		return;
+
+	/*
+	 * Unlink the old columninfo from this result set, freeing it if this
+	 * was the last reference.
+	 */
+	if (NULL != curfields)
+	{
+		if (curfields->refcount > 1)
+			curfields->refcount--;
+		else
+			CI_Destructor(curfields);
+	}
+	self->fields = fields;
+	if (NULL != fields)
+		fields->refcount++;
+}
 
 /*
  * CLASS QResult
@@ -147,15 +175,19 @@ QR_Constructor()
 
 	if (rv != NULL)
 	{
+		ColumnInfoClass	*fields;
+
 		rv->rstatus = PORES_EMPTY_QUERY;
 		rv->pstatus = 0;
 
 		/* construct the column info */
-		if (!(rv->fields = CI_Constructor()))
+		rv->fields = NULL;
+		if (fields = CI_Constructor(), NULL == fields)
 		{
 			free(rv);
 			return NULL;
 		}
+		QR_set_fields(rv, fields);
 		rv->backend_tuples = NULL;
 		rv->sqlstate[0] = '\0';
 		rv->message = NULL;
@@ -216,66 +248,75 @@ void
 QR_close_result(QResultClass *self, BOOL destroy)
 {
 	ConnectionClass	*conn;
+	QResultClass *next;
+	BOOL	top = TRUE;
 
 	if (!self)	return;
 	mylog("QResult: in QR_close_result\n");
 
-	/*
-	 * If conn is defined, then we may have used "backend_tuples", so in
-	 * case we need to, free it up.  Also, close the cursor.
-	 */
-	if ((conn = QR_get_conn(self)) && conn->sock)
+	while(self)
 	{
-		if (CC_is_in_trans(conn) ||
-		    QR_is_withhold(self))
+		/*
+		 * If conn is defined, then we may have used "backend_tuples", so in
+		 * case we need to, free it up.  Also, close the cursor.
+		 */
+		if ((conn = QR_get_conn(self)) && conn->sock)
 		{
-			if (!QR_close(self))	/* close the cursor if there is one */
+			if (CC_is_in_trans(conn) || QR_is_withhold(self))
 			{
+				if (!QR_close(self))	/* close the cursor if there is one */
+				{
+				}
 			}
 		}
+
+		QR_free_memory(self);		/* safe to call anyway */
+
+		/*
+		 * Should have been freed in the close() but just in case...
+		 * QR_set_cursor clears the cursor name of all the chained results too,
+		 * so we only need to do this for the first result in the chain.
+		 */
+		if (top)
+			QR_set_cursor(self, NULL);
+
+		/* Free up column info */
+		if (destroy)
+			QR_set_fields(self, NULL);
+
+		/* Free command info (this is from strdup()) */
+		if (self->command)
+		{
+			free(self->command);
+			self->command = NULL;
+		}
+
+		/* Free message info (this is from strdup()) */
+		if (self->message)
+		{
+			free(self->message);
+			self->message = NULL;
+		}
+
+		/* Free notice info (this is from strdup()) */
+		if (self->notice)
+		{
+			free(self->notice);
+			self->notice = NULL;
+		}
+		/* Destruct the result object in the chain */
+		next = self->next;
+		self->next = NULL;
+		if (destroy)
+			free(self);
+
+		/* Repeat for the next result in the chain */
+		self = next;
+		destroy = TRUE; /* always destroy chained results */
+		top = FALSE;
 	}
-
-	QR_free_memory(self);		/* safe to call anyway */
-
-	/* Should have been freed in the close() but just in case... */
-	QR_set_cursor(self, NULL);
-
-	/* Free up column info */
-	if (destroy && self->fields)
-	{
-		CI_Destructor(self->fields);
-		self->fields = NULL;
-	}
-
-	/* Free command info (this is from strdup()) */
-	if (self->command)
-	{
-		free(self->command);
-		self->command = NULL;
-	}
-
-	/* Free message info (this is from strdup()) */
-	if (self->message)
-	{
-		free(self->message);
-		self->message = NULL;
-	}
-
-	/* Free notice info (this is from strdup()) */
-	if (self->notice)
-	{
-		free(self->notice);
-		self->notice = NULL;
-	}
-	/* Destruct the result object in the chain */
-	QR_Destructor(self->next);
-	self->next = NULL;
 
 	mylog("QResult: exit close_result\n");
-	if (destroy)
-	{
-		free(self);
-	}
 }
 
 void
@@ -435,7 +476,7 @@ QR_free_memory(QResultClass *self)
 		{
 			char	plannm[32];
 
-			sprintf(plannm, "_KEYSET_%p", self);
+			snprintf(plannm, sizeof(plannm), "_KEYSET_%p", self);
 			if (CC_is_in_error_trans(conn))
 			{
 				CC_mark_a_object_to_discard(conn, 's',plannm);
@@ -445,7 +486,7 @@ QR_free_memory(QResultClass *self)
 				QResultClass	*res;
 				char		cmd[64];
 
-				sprintf(cmd, "DEALLOCATE \"%s\"", plannm);
+				snprintf(cmd, sizeof(cmd), "DEALLOCATE \"%s\"", plannm);
 				res = CC_send_query(conn, cmd, NULL, IGNORE_ABORT_ON_CONN | ROLLBACK_ON_ERROR, NULL);
 				QR_Destructor(res);
 			}
@@ -560,7 +601,7 @@ QR_fetch_tuples(QResultClass *self, ConnectionClass *conn, const char *cursor, i
 		if (CI_read_fields(QR_get_fields(self), QR_get_conn(self)))
 		{
 			QR_set_rstatus(self, PORES_FIELDS_OK);
-			self->num_fields = CI_get_num_fields(self->fields);
+			self->num_fields = CI_get_num_fields(QR_get_fields(self));
 			if (QR_haskeyset(self))
 				self->num_fields -= self->num_key_fields;
 		}
@@ -634,6 +675,16 @@ QR_fetch_tuples(QResultClass *self, ConnectionClass *conn, const char *cursor, i
 
 
 /*
+ *	Procedure needed when closing cursors.
+ */
+void
+QR_on_close_cursor(QResultClass *self)
+{
+	QR_set_cursor(self, NULL);
+	QR_set_has_valid_base(self);
+}
+
+/*
  *	Close the cursor and end the transaction (if no cursors left)
  *	We only close the cursor if other cursors are used.
  */
@@ -691,11 +742,7 @@ QR_close(QResultClass *self)
 			}
 		}
 
-		QR_set_no_fetching_tuples(self);
-		self->cursTuple = -1;
-
-		QR_set_cursor(self, NULL);
-		QR_set_has_valid_base(self);
+		QR_on_close_cursor(self);
 		if (!ret)
 			return ret;
 
@@ -858,7 +905,7 @@ QR_next_tuple(QResultClass *self, StatementClass *stmt, int *LastMessageType)
 	QueryInfo	qi;
 	ConnectionClass	*conn;
 	ConnInfo   *ci = NULL;
-	BOOL		msg_truncated, rcvend, loopend, kill_conn, internally_invoked = FALSE;
+	BOOL		rcvend, loopend, kill_conn, internally_invoked = FALSE;
 	BOOL		reached_eof_now = FALSE, curr_eof; /* detecting EOF is pretty important */
 	BOOL		ExecuteRequest = FALSE;
 	Int4		response_length;
@@ -874,6 +921,9 @@ inolog("in total_read=%d cursT=%d currT=%d ad=%d total=%d rowsetSize=%d\n", self
 	req_size = self->rowset_size_include_ommitted;
 	if (QR_once_reached_eof(self) && self->cursTuple >= (Int4) QR_get_num_total_read(self))
 		curr_eof = TRUE;
+#define	return	DONT_CALL_RETURN_FROM_HERE???
+#define	RETURN(code)	{ ret = code; goto cleanup;}
+	ENTER_CONN_CS(conn);
 	if (0 != self->move_offset)
 	{
 		char		movecmd[256];
@@ -894,13 +944,19 @@ inolog("in total_read=%d cursT=%d currT=%d ad=%d total=%d rowsetSize=%d\n", self
 			else
 				self->cache_size = req_size;
 inolog("cache=%d rowset=%d movement=" FORMAT_ULEN "\n", self->cache_size, req_size, movement);
-			sprintf(movecmd, "move backward " FORMAT_ULEN " in \"%s\"", movement, QR_get_cursor(self));
+			snprintf(movecmd, sizeof(movecmd),
+					 "move backward " FORMAT_ULEN " in \"%s\"",
+					 movement, QR_get_cursor(self));
 		}
 		else if (QR_is_moving_forward(self))
-			sprintf(movecmd, "move " FORMAT_ULEN " in \"%s\"", movement, QR_get_cursor(self));
+			snprintf(movecmd, sizeof(movecmd),
+					 "move " FORMAT_ULEN " in \"%s\"",
+					 movement, QR_get_cursor(self));
 		else
 		{
-			sprintf(movecmd, "move all in \"%s\"", QR_get_cursor(self));
+			snprintf(movecmd, sizeof(movecmd),
+					 "move all in \"%s\"",
+					 QR_get_cursor(self));
 			movement = INT_MAX;
 		}
 		mres = CC_send_query(conn, movecmd, NULL, 0, stmt);
@@ -909,7 +965,7 @@ inolog("cache=%d rowset=%d movement=" FORMAT_ULEN "\n", self->cache_size, req_si
 			QR_Destructor(mres);
 			if (stmt)
 				SC_set_error(stmt, STMT_EXEC_ERROR, "move error occured", func);
-			return -1;
+			RETURN(-1)
 		}
 		moved = movement;
 		if (sscanf(mres->command, "MOVE " FORMAT_ULEN, &moved) > 0)
@@ -945,14 +1001,16 @@ inolog("FETCH LAST case\n");
 						self->tupleField = NULL;
 						SC_set_rowset_start(stmt, -1, TRUE);
 						stmt->currTuple = -1;
-						return -1;
+						RETURN(-1)
 					}
 					back_offset = QR_get_num_total_tuples(self) - backpt;
 inolog("back_offset=%d and move_offset=%d\n", back_offset, self->move_offset);
 					if (back_offset + 1 > (Int4) self->ad_count)
 					{
 						bmovement = back_offset + 1 - self->ad_count;
-						sprintf(movecmd, "move backward " FORMAT_ULEN " in \"%s\"", bmovement, QR_get_cursor(self));
+						snprintf(movecmd, sizeof(movecmd),
+								 "move backward " FORMAT_ULEN " in \"%s\"",
+								 bmovement, QR_get_cursor(self));
 						QR_Destructor(mres);
 						mres = CC_send_query(conn, movecmd, NULL, 0, stmt);
 						if (!QR_command_maybe_successful(mres))
@@ -960,7 +1018,7 @@ inolog("back_offset=%d and move_offset=%d\n", back_offset, self->move_offset);
 							QR_Destructor(mres);
 							if (stmt)
 								SC_set_error(stmt, STMT_EXEC_ERROR, "move error occured", func);
-							return -1;
+							RETURN(-1)
 						}
 
 						if (sscanf(mres->command, "MOVE " FORMAT_ULEN, &mback) > 0)
@@ -1023,7 +1081,7 @@ inolog("back_offset=%d and move_offset=%d\n", back_offset, self->move_offset);
 		{
 			if (stmt)
 				SC_set_error(stmt, STMT_EXEC_ERROR, "Hmm where are fetched data?", func);
-			return -1;
+			RETURN(-1)
 		}
 		/* return a row from cache */
 		mylog("%s: fetch_number < fcount: returning tuple %d, fcount = %d\n", func, fetch_number, num_backend_rows);
@@ -1031,7 +1089,7 @@ inolog("back_offset=%d and move_offset=%d\n", back_offset, self->move_offset);
 inolog("tupleField=%p\n", self->tupleField);
 		/* move to next row */
 		QR_inc_next_in_cache(self);
-		return TRUE;
+		RETURN(TRUE)
 	}
 	else if (QR_once_reached_eof(self))
 	{
@@ -1053,7 +1111,7 @@ inolog("tupleField=%p\n", self->tupleField);
 			mylog("next_tuple: fetch end\n");
 			self->tupleField = NULL;
 			/* end of tuples */
-			return -1;
+			RETURN(-1)
 		}
 	}
 
@@ -1074,7 +1132,7 @@ inolog("tupleField=%p\n", self->tupleField);
 			mylog("%s: ALL_ROWS: done, fcount = %d, fetch_number = %d\n", func, QR_get_num_total_tuples(self), fetch_number);
 			self->tupleField = NULL;
 			QR_set_reached_eof(self);
-			return -1;		/* end of tuples */
+			RETURN(-1)		/* end of tuples */
 		}
 
 		if (QR_get_rowstart_in_cache(self) >= num_backend_rows ||
@@ -1113,7 +1171,7 @@ inolog("clear obsolete %d tuples\n", num_backend_rows);
 			if (fetch_size <= 0)
 			{
 				mylog("corrupted fetch_size end_tuple=%d <= cached_rows=%d\n", end_tuple, num_backend_rows);
-				return -1;
+				RETURN(-1)
 			}
 			/* and enlarge the cache size */
 			self->cache_size += fetch_size;
@@ -1123,7 +1181,7 @@ inolog("clear obsolete %d tuples\n", num_backend_rows);
 		}
 
 		if (enlargeKeyCache(self, self->cache_size - num_backend_rows, "Out of memory while reading tuples") < 0)
-			return FALSE;
+			RETURN(FALSE)
 		if (PROTOCOL_74(ci)
 		    && !QR_is_permanent(self) /* Execute seems an invalid operation after COMMIT */ 
 			)
@@ -1131,14 +1189,16 @@ inolog("clear obsolete %d tuples\n", num_backend_rows);
 			ExecuteRequest = TRUE;
 			if (!SendExecuteRequest(stmt, QR_get_cursor(self),
 				fetch_size))
-				return FALSE;
+				RETURN(FALSE)
 			if (!SendSyncRequest(conn))
-				return FALSE;
+				RETURN(FALSE)
 		}
 		else
 		{
 			QResultClass	*res;
-			sprintf(fetch, "fetch %d in \"%s\"", fetch_size, QR_get_cursor(self));
+			snprintf(fetch, sizeof(fetch),
+					 "fetch %d in \"%s\"",
+					 fetch_size, QR_get_cursor(self));
 
 			mylog("%s: sending actual fetch (%d) query '%s'\n", func, fetch_size, fetch);
 
@@ -1151,7 +1211,7 @@ inolog("clear obsolete %d tuples\n", num_backend_rows);
 			{
 				if (!QR_get_message(self))
 					QR_set_message(self, "Error fetching next group.");
-				return FALSE;
+				RETURN(FALSE)
 			}
 		}
 		internally_invoked = TRUE;
@@ -1220,14 +1280,14 @@ inolog("id='%c' response_length=%d\n", id, response_length);
 				{
 					CC_set_error(conn, CONNECTION_COULD_NOT_RECEIVE, "Could not create result info in QR_next_tuple.", func);
 					CC_on_abort(conn, CONN_DEAD);
-					return FALSE;
+					RETURN(FALSE)
 				}
 				QR_set_cache_size(self->next, self->cache_size);
 				self = self->next;
 				if (!QR_fetch_tuples(self, conn, NULL, LastMessageType))
 				{
 					CC_set_error(conn, CONNECTION_COULD_NOT_RECEIVE, QR_get_message(self), func);
-					return FALSE;
+					RETURN(FALSE)
 				}
 
 				loopend = rcvend = TRUE;
@@ -1280,7 +1340,7 @@ inolog("id='%c' response_length=%d\n", id, response_length);
 				break;
 
 			case 'E':			/* Error */
-				msg_truncated = handle_error_message(conn, msgbuffer, sizeof(msgbuffer), self->sqlstate, "next_tuple", self);
+				handle_error_message(conn, msgbuffer, sizeof(msgbuffer), self->sqlstate, "next_tuple", self);
 
 				mylog("ERROR from backend in next_tuple: '%s'\n", msgbuffer);
 				qlog("ERROR from backend in next_tuple: '%s'\n", msgbuffer);
@@ -1292,7 +1352,7 @@ inolog("id='%c' response_length=%d\n", id, response_length);
 				break;
 
 			case 'N':			/* Notice */
-				msg_truncated = handle_notice_message(conn, cmdbuffer, sizeof(cmdbuffer), self->sqlstate, "next_tuple", self);
+				handle_notice_message(conn, cmdbuffer, sizeof(cmdbuffer), self->sqlstate, "next_tuple", self);
 				qlog("NOTICE from backend in next_tuple: '%s'\n", msgbuffer);
 				continue;
 
@@ -1368,7 +1428,7 @@ inolog("id='%c' response_length=%d\n", id, response_length);
 		ret = FALSE;
 	}
 	if (!ret)
-		return ret;
+		RETURN(ret)
 
 	if (!QR_is_fetching_tuples(self))
 	{
@@ -1380,7 +1440,14 @@ inolog("id='%c' response_length=%d\n", id, response_length);
 			mylog("%s: reached eof now\n", func);
 			QR_set_reached_eof(self);
 			if (!curr_eof)
+			{
+				if (self->cursTuple >= (Int4) self->num_total_read)
+{
+					self->num_total_read = self->cursTuple + 1;
+inolog("mayumi setting total_read to %d\n", self->num_total_read); 
+}
 				self->cursTuple++;
+			}
 			if (self->ad_count > 0 &&
 			    cur_fetch < fetch_size)
 			{
@@ -1412,7 +1479,7 @@ inolog("will add %d added_tuples from %d and select the %dth added tuple\n", add
 				else if (add_size < 0)
 					add_size = 0;
 				if (enlargeKeyCache(self, add_size, "Out of memory while adding tuples") < 0)
-					return FALSE;
+					RETURN(FALSE)
 				/* append the KeySet info first */
 				memcpy(self->keyset + num_backend_rows, (void *)(self->added_keyset + start_idx), sizeof(KeySet) * add_size);
 				/* and append the tuples info */
@@ -1487,6 +1554,10 @@ inolog("will add %d added_tuples from %d and select the %dth added tuple\n", add
 		}
 	}
 
+cleanup:
+	LEAVE_CONN_CS(conn);
+#undef	RETURN
+#undef	return
 inolog("%s returning %d offset=%d\n", func, ret, offset);
 	return ret;
 }
@@ -1498,7 +1569,7 @@ QR_read_a_tuple_from_db(QResultClass *self, char binary)
 	Int2		field_lf;
 	TupleField *this_tuplefield;
 	KeySet	*this_keyset = NULL;
-	char		bmp,
+	char		bmp = 0,
 				bitmap[MAX_FIELDS];		/* Max. len of the bitmap */
 	Int2		bitmaplen;		/* len of the bitmap in bytes */
 	Int2		bitmap_pos;
@@ -1523,10 +1594,6 @@ QR_read_a_tuple_from_db(QResultClass *self, char binary)
 		this_keyset->status = 0;
 	}
 
-	bitmaplen = (Int2) ci_num_fields / BYTELEN;
-	if ((ci_num_fields % BYTELEN) > 0)
-		bitmaplen++;
-
 	/*
 	 * At first the server sends a bitmap that indicates which database
 	 * fields are null
@@ -1540,45 +1607,72 @@ else
 {inolog("%dth record in key numf=%d\n", self->num_cached_keys, numf);}
 	}
 	else
+	{
+		bitmaplen = (Int2) ci_num_fields / BYTELEN;
+		if ((ci_num_fields % BYTELEN) > 0)
+			bitmaplen++;
+
 		SOCK_get_n_char(sock, bitmap, bitmaplen);
 
+		bitmap_pos = 0;
+		bitcnt = 0;
+		bmp = bitmap[bitmap_pos];
+	}
 
-	bitmap_pos = 0;
-	bitcnt = 0;
-	bmp = bitmap[bitmap_pos];
-	flds = self->fields;
+	flds = QR_get_fields(self);
 
 	for (field_lf = 0; field_lf < ci_num_fields; field_lf++)
 	{
-		/* Check if the current field is NULL */
-		if (!PROTOCOL_74(ci) && (!(bmp & 0200)))
+		BOOL isnull = FALSE;
+
+		if (!PROTOCOL_74(ci))
 		{
-			/* YES, it is NULL ! */
-			this_tuplefield[field_lf].len = 0;
-			this_tuplefield[field_lf].value = 0;
+			isnull = ((bmp & 0200) == 0);
+			/* move to next bit in the bitmap */
+			bitcnt++;
+			if (BYTELEN == bitcnt)
+			{
+				bitmap_pos++;
+				bmp = bitmap[bitmap_pos];
+				bitcnt = 0;
+			}
+			else
+				bmp <<= 1;
+
+			if (!isnull)
+			{
+				/* get the length of the field (four bytes) */
+				len = SOCK_get_int(sock, sizeof(Int4));
+
+				/*
+				 * In the old protocol version, the length
+				 * field of an AsciiRow message includes the
+				 * 4-byte length field itself, while the
+				 * length field in the BinaryRow does not.
+				 */
+				if (!binary)
+					len -= sizeof(Int4);
+			}
 		}
 		else
 		{
-			/*
-			 * NO, the field is not null. so get at first the length of
-			 * the field (four bytes)
-			 */
-			len = SOCK_get_int(sock, VARHDRSZ);
-inolog("QR_read_a_tuple_from_db len=%d\n", len);
-			if (PROTOCOL_74(ci))
-			{
-				if (len < 0)
-				{
-					/* YES, it is NULL ! */
-					this_tuplefield[field_lf].len = 0;
-					this_tuplefield[field_lf].value = 0;
-					continue;
-				}
-			}
-			else
-			if (!binary)
-				len -= VARHDRSZ;
+			/* get the length of the field (four bytes) */
+			len = SOCK_get_int(sock, sizeof(Int4));
 
+			/* -1 means NULL */
+			if (len < 0)
+				isnull = TRUE;
+
+		}
+
+		if (isnull)
+		{
+			this_tuplefield[field_lf].len = 0;
+			this_tuplefield[field_lf].value = 0;
+			continue;
+		}
+		else
+		{
 			if (field_lf >= effective_cols)
 				buffer = tidoidbuf;
 			else
@@ -1616,19 +1710,6 @@ inolog("QR_read_a_tuple_from_db len=%d\n", len);
 					CI_get_display_size(flds, field_lf) = len;
 			}
 		}
-
-		/*
-		 * Now adjust for the next bit to be scanned in the next loop.
-		 */
-		bitcnt++;
-		if (BYTELEN == bitcnt)
-		{
-			bitmap_pos++;
-			bmp = bitmap[bitmap_pos];
-			bitcnt = 0;
-		}
-		else
-			bmp <<= 1;
 	}
 	self->cursTuple++;
 	return TRUE;

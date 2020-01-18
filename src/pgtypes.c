@@ -12,7 +12,7 @@
  *
  * API functions:	none
  *
- * Comments:		See "notice.txt" for copyright and license information.
+ * Comments:		See "readme.txt" for copyright and license information.
  *--------
  */
 
@@ -632,16 +632,16 @@ pgtype_attr_to_concise_type(const ConnectionClass *conn, OID type, int atttypmod
 		case PG_TYPE_BOOL:
 			return ci->drivers.bools_as_char ? SQL_VARCHAR : SQL_BIT;
 		case PG_TYPE_XML:
-			return CC_is_in_unicode_driver(conn) ? SQL_WLONGVARCHAR : SQL_LONGVARCHAR;
+			return ALLOW_WCHAR(conn) ? SQL_WLONGVARCHAR : SQL_LONGVARCHAR;
 		case PG_TYPE_INET:
 		case PG_TYPE_CIDR:
 		case PG_TYPE_MACADDR:
-			return CC_is_in_unicode_driver(conn) ? SQL_WVARCHAR : SQL_VARCHAR;
+			return ALLOW_WCHAR(conn) ? SQL_WVARCHAR : SQL_VARCHAR;
 		case PG_TYPE_UUID:
 #if (ODBCVER >= 0x0350)
 			return SQL_GUID;
 #endif /* ODBCVER */
-			return CC_is_in_unicode_driver(conn) ? SQL_WVARCHAR : SQL_VARCHAR;
+			return ALLOW_WCHAR(conn) ? SQL_WVARCHAR : SQL_VARCHAR;
 
 		case PG_TYPE_INTERVAL:
 #ifdef	PG_INTERVAL_AS_SQL_INTERVAL
@@ -789,16 +789,14 @@ pgtype_attr_to_ctype(const ConnectionClass *conn, OID type, int atttypmod)
 		case PG_TYPE_BPCHAR:
 		case PG_TYPE_VARCHAR:
 		case PG_TYPE_TEXT:
-			if (CC_is_in_unicode_driver(conn))
-				return SQL_C_WCHAR;
-			return SQL_C_CHAR;
+			return ALLOW_WCHAR(conn) ? SQL_C_WCHAR : SQL_C_CHAR;
 #endif /* UNICODE_SUPPORT */
 		case PG_TYPE_UUID:
 #if (ODBCVER >= 0x0350)
 			if (!conn->ms_jet)
 				return SQL_C_GUID;
 #endif /* ODBCVER */
-			return SQL_C_CHAR;
+			return ALLOW_WCHAR(conn) ? SQL_C_WCHAR : SQL_C_CHAR;
 
 		case PG_TYPE_INTERVAL:
 #ifdef	PG_INTERVAL_AS_SQL_INTERVAL
@@ -942,7 +940,19 @@ pgtype_attr_column_size(const ConnectionClass *conn, OID type, int atttypmod, in
 			{
 				int	value = 0;
 				if (PG_VERSION_GT(conn, 7.4))
-					value = CC_get_max_idlen(conn);
+				{
+					/*
+					 * 'conn' argument is marked as const,
+					 * because this function just reads
+					 * stuff from the already-filled in
+					 * fields in the struct. But this is
+					 * an exception: CC_get_max_idlen() can
+					 * send a SHOW query to the backend to
+					 * get the identifier length. Thus cast
+					 * away the const here.
+					 */
+					value = CC_get_max_idlen((ConnectionClass *) conn);
+				}
 #ifdef	NAME_FIELD_SIZE
 				else
 					value = NAME_FIELD_SIZE;
@@ -1073,6 +1083,11 @@ pgtype_attr_display_size(const ConnectionClass *conn, OID type, int atttypmod, i
 		case PG_TYPE_FLOAT8:
 			return 22;
 
+		case PG_TYPE_MACADDR:
+			return 17;
+		case PG_TYPE_INET:
+		case PG_TYPE_CIDR:
+			return sizeof("xxxx:xxxx:xxxx:xxxx:xxxx:xxxx:255.255.255.255/128");
 #if (ODBCVER >= 0x0350)
 		case PG_TYPE_UUID:
 			return 36;
@@ -1128,8 +1143,16 @@ pgtype_attr_buffer_length(const ConnectionClass *conn, OID type, int atttypmod, 
 		case PG_TYPE_TIMESTAMP_NO_TMZONE:
 			return 16;		/* sizeof(TIMESTAMP_STRUCT) */
 
+		case PG_TYPE_MACADDR:
+			return 17;
+		case PG_TYPE_INET:
+		case PG_TYPE_CIDR:
+			return sizeof("xxxx:xxxx:xxxx:xxxx:xxxx:xxxx:255.255.255.255/128");
 		case PG_TYPE_UUID:
+#if (ODBCVER >= 0x0350)
 			return 16;		/* sizeof(SQLGUID) */
+#endif /* ODBCVER */
+			return 36;
 
 			/* Character types use the default precision */
 		case PG_TYPE_VARCHAR:
@@ -1559,7 +1582,7 @@ getNumericDecimalDigits(const StatementClass *stmt, OID type, int col)
 		return (atttypmod & 0xffff);
 	if (stmt->catalog_result)
 	{
-		flds = result->fields;
+		flds = QR_get_fields(result);
 		if (flds)
 		{
 			int	fsize = CI_get_fieldsize(flds, col);
@@ -1603,7 +1626,7 @@ getNumericColumnSize(const StatementClass *stmt, OID type, int col)
 		return (atttypmod >> 16) & 0xffff;
 	if (stmt->catalog_result)
 	{
-		flds = result->fields;
+		flds = QR_get_fields(result);
 		if (flds)
 		{
 			int	fsize = CI_get_fieldsize(flds, col);

@@ -8,7 +8,7 @@
  *
  * API functions:	SQLDriverConnect
  *
- * Comments:		See "notice.txt" for copyright and license information.
+ * Comments:		See "readme.txt" for copyright and license information.
  *-------
  */
 
@@ -18,6 +18,7 @@
 #include <stdlib.h>
 
 #include "connection.h"
+#include "misc.h"
 
 #ifndef WIN32
 #include <sys/types.h>
@@ -37,8 +38,10 @@
 
 #include "dlg_specific.h"
 
+#define	FORCE_PASSWORD_DISPLAY
 #define	NULL_IF_NULL(a) (a ? a : "(NULL)")
 
+#ifndef FORCE_PASSWORD_DISPLAY
 static char * hide_password(const char *str)
 {
 	char *outstr, *pwdp;
@@ -56,6 +59,7 @@ static char * hide_password(const char *str)
 	}
 	return outstr;
 }
+#endif
 
 /* prototypes */
 void		dconn_get_connect_attributes(const SQLCHAR FAR * connect_string, ConnInfo *ci);
@@ -290,8 +294,8 @@ inolog("before CC_connect\n");
 #ifdef	FORCE_PASSWORD_DISPLAY
 	if (cbConnStrOutMax > 0)
 	{
-		mylog("szConnStrOut = '%s' len=%d,%d\n", NULL_IF_NULL(szConnStrOut), len, cbConnStrOutMax);
-		qlog("conn=%p, PGAPI_DriverConnect(out)='%s'\n", conn, NULL_IF_NULL(szConnStrOut));
+		mylog("szConnStrOut = '%s' len=%d,%d\n", NULL_IF_NULL((char *) szConnStrOut), len, cbConnStrOutMax);
+		qlog("conn=%p, PGAPI_DriverConnect(out)='%s'\n", conn, NULL_IF_NULL((char *) szConnStrOut));
 	}
 #else
 	if (get_qlog() || get_mylog())
@@ -415,6 +419,9 @@ dconn_FDriverConnectProc(
 }
 #endif   /* WIN32 */
 
+#define	ATTRIBUTE_DELIMITER	';'
+#define	OPENING_BRACKET		'{'
+#define	CLOSING_BRACKET		'}'
 
 typedef	BOOL (*copyfunc)(ConnInfo *, const char *attribute, const char *value);
 static void
@@ -469,21 +476,45 @@ dconn_get_attributes(copyfunc func, const SQLCHAR FAR * connect_string, ConnInfo
 		*equals = '\0';
 		attribute = pair;		/* ex. DSN */
 		value = equals + 1;		/* ex. 'CEO co1' */
-		/* values enclosed with braces({}) can contain ; etc */
-		if ('{' == *value)
+		/*
+		 * Values enclosed with braces({}) can contain ; etc
+		 * We don't remove the braces here because 
+		 * decode_or_remove_braces() in dlg_specifi.c
+		 * would remove them later.
+		 * Just correct the misdetected delimter(;).  
+		 */
+		if (OPENING_BRACKET == *value)
 		{
-			if (delp = strchr(value, '\0'), NULL != delp && delp != termp)
+			delp = strchr(value, '\0');
+			if (NULL == delp) continue; /* shouldn't occur */
+			if (delp == termp)
 			{
-				*delp = ';';
-				if (delp = strchr(value, '}'), NULL != delp)
-				{
-					if (delp = strchr(delp + 1, ';'), NULL != delp)
-						*delp = '\0';
-				}
-				if (delp = strchr(value, '\0'), delp == termp)
+				/* there's a corresponding closing bracket? */
+				if (CLOSING_BRACKET == delp[-1])
 					eoftok = TRUE;
-				else
-					strtok_arg = delp + 1;
+			}
+			else
+			{
+				char	*closep;
+
+				/* Where's a corresponding closing bracket? */
+				closep = strchr(value, CLOSING_BRACKET);
+				if (NULL == closep)
+				{
+					closep = strchr(delp + 1, CLOSING_BRACKET);
+					if (NULL != closep) /* the delimiter is misdetected */
+					{
+						*delp = ATTRIBUTE_DELIMITER;
+						strtok_arg = closep + 1;
+						if (delp = strchr(closep + 1, ATTRIBUTE_DELIMITER), NULL != delp)
+						{
+							*delp = '\0'; 
+							strtok_arg = delp + 1;
+						}
+						if (strtok_arg + 1 >= termp)
+							eoftok = TRUE;
+					}
+				}
 			}
 		}
 
@@ -510,7 +541,7 @@ void
 dconn_get_connect_attributes(const SQLCHAR FAR * connect_string, ConnInfo *ci)
 {
 
-	CC_conninfo_init(ci);
+	CC_conninfo_init(ci, COPY_GLOBALS);
 	dconn_get_attributes(copyAttributes, connect_string, ci);
 }
 

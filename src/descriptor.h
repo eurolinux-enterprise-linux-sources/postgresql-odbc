@@ -3,87 +3,13 @@
  * Description:		This file contains defines and declarations that are related to
  *					the entire driver.
  *
- * Comments:		See "notice.txt" for copyright and license information.
- *
- * $Id: descriptor.h,v 1.23 2011/06/18 11:26:42 hinoue Exp $
- *
+ * Comments:		See "readme.txt" for copyright and license information.
  */
 
 #ifndef __DESCRIPTOR_H__
 #define __DESCRIPTOR_H__
 
 #include "psqlodbc.h"
-
-typedef struct
-{
-	char	*name;
-} pgNAME;
-#define	GET_NAME(the_name)	((the_name).name)
-#define	SAFE_NAME(the_name)	((the_name).name ? (the_name).name : NULL_STRING)
-#define	PRINT_NAME(the_name)	((the_name).name ? (the_name).name : PRINT_NULL)
-#define	NAME_IS_NULL(the_name)	(NULL == (the_name).name)
-#define	NAME_IS_VALID(the_name)	(NULL != (the_name).name)
-#define	INIT_NAME(the_name) ((the_name).name = NULL)
-#define	NULL_THE_NAME(the_name) \
-do { \
-	if ((the_name).name) free((the_name).name); \
-	(the_name).name = NULL; \
-} while (0)
-#define	STR_TO_NAME(the_name, str) \
-do { \
-	if ((the_name).name) \
-		free((the_name).name); \
-	(the_name).name = (str ? strdup((str)) : NULL); \
-} while (0)
-/*
- * a modified version of macro STR_TO_NAME to suppress compiler warnings
- * when the compiler may confirm str != NULL.
- */ 
-#define	STRX_TO_NAME(the_name, str) \
-do { \
-	if ((the_name).name) \
-		free((the_name).name); \
-	(the_name).name = strdup((str)); \
-} while (0)
-
-#define	STRN_TO_NAME(the_name, str, n) \
-do { \
-	if ((the_name).name) \
-		free((the_name).name); \
-	if (str) \
-	{ \
-		(the_name).name = malloc(n + 1); \
-		memcpy((the_name).name, str, n); \
-		(the_name).name[n] = '\0'; \
-	} \
-	else \
-		(the_name).name = NULL; \
-} while (0)
-#define	NAME_TO_STR(str, the_name) \
-do {\
-	if ((the_name).name) strcpy(str, (the_name).name); \
-	else *str = '\0'; \
-} while (0)
-#define	NAME_TO_NAME(to, from) \
-do { \
-	if ((to).name) \
-		free((to).name); \
-	if ((from).name) \
-		(to).name = strdup(from.name); \
-	else \
-		(to).name = NULL; \
-} while (0)
-#define	MOVE_NAME(to, from) \
-do { \
-	if ((to).name) \
-		free((to).name); \
-	(to).name = (from).name; \
-	(from).name = NULL; \
-} while (0)
-#define	SET_NAME(the_name, str) ((the_name).name = (str))
-
-#define	NAMECMP(name1, name2) (strcmp(SAFE_NAME(name1), SAFE_NAME(name2)))
-#define	NAMEICMP(name1, name2) (stricmp(SAFE_NAME(name1), SAFE_NAME(name2)))
 
 enum {
 	TI_UPDATABLE	=	1L
@@ -213,11 +139,7 @@ struct IRDFields_
 
 struct IPDFields_
 {
-#if (ODBCVER >= 0x0300)
-	SQLUINTEGER		*param_processed_ptr;
-#else
-	SQLULEN			*param_processed_ptr; /* SQLParamOptions */
-#endif /* ODBCVER */
+	SQLULEN			*param_processed_ptr;
 	SQLUSMALLINT		*param_status_ptr;
 	SQLSMALLINT		allocated;
 	ParameterImplClass	*parameters;

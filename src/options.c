@@ -9,13 +9,14 @@
  * API functions:	SQLSetConnectOption, SQLSetStmtOption, SQLGetConnectOption,
  *					SQLGetStmtOption
  *
- * Comments:		See "notice.txt" for copyright and license information.
+ * Comments:		See "readme.txt" for copyright and license information.
  *--------
  */
 
 #include "psqlodbc.h"
 #include <string.h>
 
+#include "misc.h"
 #include "environ.h"
 #include "connection.h"
 #include "statement.h"
@@ -138,7 +139,7 @@ set_statement_option(ConnectionClass *conn,
 				stmt->options_orig.keyset_size = vParam;
 				if (!SC_get_Result(stmt)) 
 					stmt->options.keyset_size = vParam;
-				if (stmt->options.keyset_size != (int)vParam)
+				if (stmt->options.keyset_size != (SQLLEN) vParam)
 					changed = TRUE;
 			}
 
@@ -153,7 +154,7 @@ set_statement_option(ConnectionClass *conn,
 				stmt->options_orig.maxLength = vParam;
 				if (!SC_get_Result(stmt)) 
 					stmt->options.maxLength = vParam;
-				if (stmt->options.maxLength != (int)vParam)
+				if (stmt->options.maxLength != (SQLLEN) vParam)
 					changed = TRUE;
 			}
 			break;
@@ -167,7 +168,7 @@ set_statement_option(ConnectionClass *conn,
 				stmt->options_orig.maxRows = vParam;
 				if (!SC_get_Result(stmt)) 
 					stmt->options.maxRows = vParam;
-				if (stmt->options.maxRows != (int)vParam)
+				if (stmt->options.maxRows != (SQLLEN)vParam)
 					changed = TRUE;
 			}
 			break;
@@ -261,13 +262,13 @@ set_statement_option(ConnectionClass *conn,
 				if (stmt)
 				{
 					SC_set_error(stmt, STMT_NOT_IMPLEMENTED_ERROR, "Unknown statement option (Set)", NULL);
-					sprintf(option, "fOption=%d, vParam=" FORMAT_LEN, fOption, vParam);
+					sprintf(option, "fOption=%d, vParam=" FORMAT_ULEN, fOption, vParam);
 					SC_log_error(func, option, stmt);
 				}
 				if (conn)
 				{
 					CC_set_error(conn, CONN_NOT_IMPLEMENTED_ERROR, "Unknown statement option (Set)", func);
-					sprintf(option, "fOption=%d, vParam=" FORMAT_LEN, fOption, vParam);
+					sprintf(option, "fOption=%d, vParam=" FORMAT_ULEN, fOption, vParam);
 					CC_log_error(func, option, conn);
 				}
 
@@ -386,10 +387,10 @@ PGAPI_SetConnectOption(
 			mylog("%s: AUTOCOMMIT: transact_status=%d, vparam=" FORMAT_LEN "\n", func, conn->transact_status, vParam);
 
 #ifdef	_HANDLE_ENLIST_IN_DTC_
-			if (NULL != conn->asdum)
+			if (CC_is_in_global_trans(conn))
 			{
-				mylog("%s: Ignored AUTOCOMMIT in a distributed transaction, OK ?");
-				break;
+				CC_set_error(conn, CONN_TRANSACT_IN_PROGRES, "Don't change AUTOCOMMIT mode in a distributed transaction", func);
+				return SQL_ERROR;
 			}
 #endif	/* _HANDLE_ENLIST_IN_DTC_ */
 			CC_set_autocommit(conn, autocomm_on);
@@ -734,7 +735,7 @@ PGAPI_GetStmtOption(
 			{
 				/* make sure we're positioned on a valid row */
 				if ((ridx < 0) ||
-					(ridx >= QR_get_num_cached_tuples(res)))
+					(((SQLULEN) ridx) >= QR_get_num_cached_tuples(res)))
 				{
 					SC_set_error(stmt, STMT_INVALID_CURSOR_STATE_ERROR, "Not positioned on a valid row.", func);
 					return SQL_ERROR;

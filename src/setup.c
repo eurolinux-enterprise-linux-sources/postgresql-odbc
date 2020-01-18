@@ -9,11 +9,12 @@
  *
  * API functions:	ConfigDSN, ConfigDriver
  *
- * Comments:		See "notice.txt" for copyright and license information.
+ * Comments:		See "readme.txt" for copyright and license information.
  *-------
  */
 
 #include  "psqlodbc.h"
+#include  "misc.h" // strncpy_null
 
 #include  "environ.h"
 #include  "connection.h"
@@ -105,11 +106,11 @@ ConfigDSN(HWND hwnd,
 		if (hwnd)
 		{
 			/* Display dialog(s) */
-			fSuccess = (IDOK == DialogBoxParam(s_hModule,
-											 MAKEINTRESOURCE(DLG_CONFIG),
-											   hwnd,
-											   ConfigDlgProc,
-											 (LONG) (LPSTR) lpsetupdlg));
+			fSuccess = (IDOK == DialogBoxParam(s_hModule, 
+				MAKEINTRESOURCE(DLG_CONFIG), 
+				hwnd, 
+				ConfigDlgProc, 
+				(LPARAM) lpsetupdlg));
 		}
 		else if (lpsetupdlg->ci.dsn[0])
 			fSuccess = SetDSNAttributes(hwnd, lpsetupdlg, NULL);
@@ -142,7 +143,7 @@ ConfigDSN(HWND hwnd,
  *	Returns :	TRUE success, FALSE otherwise
  *--------
  */
-static BOOL SetDriverAttributes(LPCSTR lpszDriver);
+static BOOL SetDriverAttributes(LPCSTR lpszDriver, DWORD *pErrorCode, LPSTR pErrorMessage, WORD cbMessage);
 BOOL		CALLBACK
 ConfigDriver(HWND hwnd,
 		WORD fRequest,
@@ -152,12 +153,31 @@ ConfigDriver(HWND hwnd,
 		WORD cbMsgMax,
 		WORD *pcbMsgOut)
 {
+	DWORD	errorCode = 0;
 	BOOL	fSuccess = TRUE;	/* Success/fail flag */
 
-	/* Add the driver */
-	if (ODBC_INSTALL_DRIVER == fRequest)
-		fSuccess = SetDriverAttributes(lpszDriver);
+	if (cbMsgMax > 0 && NULL != lpszMsg)
+		*lpszMsg = '\0';
+	if (NULL != pcbMsgOut)
+		*pcbMsgOut = 0;
 
+	/* Add the driver */
+	switch (fRequest)
+	{
+		case ODBC_INSTALL_DRIVER:
+			fSuccess = SetDriverAttributes(lpszDriver, &errorCode, lpszMsg, cbMsgMax);
+			if (cbMsgMax > 0 && NULL != lpszMsg)
+				*pcbMsgOut = (WORD) strlen(lpszMsg);
+			break;
+		case ODBC_REMOVE_DRIVER:
+			break;
+		default:
+			errorCode = ODBC_ERROR_INVALID_REQUEST_TYPE;
+			fSuccess = FALSE;
+	}
+
+	if (!fSuccess)
+		SQLPostInstallerError(errorCode, lpszMsg);
 	return fSuccess;
 }
 
@@ -256,7 +276,7 @@ ConfigDlgProc(HWND hdlg,
 			 */
 			/* override settings in ODBC.INI */
 
-			memcpy(&ci->drivers, &globals, sizeof(globals));
+			copy_globals(&ci->drivers, &globals);
 			/* Get the rest of the common attributes */
 			getDSNinfo(ci, CONN_DONT_OVERWRITE);
 
@@ -306,7 +326,7 @@ ConfigDlgProc(HWND hdlg,
 					/* Accept results */
 				case IDOK:
 				case IDAPPLY:
-					lpsetupdlg = (LPSETUPDLG) GetWindowLong(hdlg, DWLP_USER);
+					lpsetupdlg = (LPSETUPDLG) GetWindowLongPtr(hdlg, DWLP_USER);
 					/* Retrieve dialog values */
 					if (!lpsetupdlg->fDefault)
 						GetDlgItemText(hdlg, IDC_DSNAME,
@@ -326,7 +346,7 @@ ConfigDlgProc(HWND hdlg,
 
 				case IDC_TEST:
 				{
-					lpsetupdlg = (LPSETUPDLG) GetWindowLong(hdlg, DWLP_USER);
+					lpsetupdlg = (LPSETUPDLG) GetWindowLongPtr(hdlg, DWLP_USER);
 					if (NULL != lpsetupdlg)
 					{
 						EnvironmentClass *env = EN_Constructor();
@@ -348,7 +368,7 @@ ConfigDlgProc(HWND hdlg,
 							int errnum;
 
 							EN_add_connection(env, conn);
-							memcpy(&conn->connInfo, &lpsetupdlg->ci, sizeof(ConnInfo));
+							CC_copy_conninfo(&conn->connInfo, &lpsetupdlg->ci);
 							CC_initialize_pg_version(conn);
 							logs_on_off(1, conn->connInfo.drivers.debug, conn->connInfo.drivers.commlog);
 #ifdef	UNICODE_SUPPORT
@@ -397,19 +417,19 @@ ConfigDlgProc(HWND hdlg,
 					break;
 				}
 				case IDC_DATASOURCE:
-					lpsetupdlg = (LPSETUPDLG) GetWindowLong(hdlg, DWLP_USER);
+					lpsetupdlg = (LPSETUPDLG) GetWindowLongPtr(hdlg, DWLP_USER);
 					DialogBoxParam(s_hModule, MAKEINTRESOURCE(DLG_OPTIONS_DRV),
 					 hdlg, ds_options1Proc, (LPARAM) &lpsetupdlg->ci);
 					return TRUE;
 
 				case IDC_DRIVER:
-					lpsetupdlg = (LPSETUPDLG) GetWindowLong(hdlg, DWLP_USER);
+					lpsetupdlg = (LPSETUPDLG) GetWindowLongPtr(hdlg, DWLP_USER);
 					DialogBoxParam(s_hModule, MAKEINTRESOURCE(DLG_OPTIONS_GLOBAL),
 						 hdlg, global_optionsProc, (LPARAM) &lpsetupdlg->ci);
 
 					return TRUE;
 				case IDC_MANAGEDSN:
-					lpsetupdlg = (LPSETUPDLG) GetWindowLong(hdlg, DWLP_USER);
+					lpsetupdlg = (LPSETUPDLG) GetWindowLongPtr(hdlg, DWLP_USER);
 					if (DialogBoxParam(s_hModule, MAKEINTRESOURCE(DLG_DRIVER_CHANGE),
 						hdlg, manage_dsnProc,
 						(LPARAM) lpsetupdlg) > 0)
@@ -450,7 +470,7 @@ ParseAttributes(LPCSTR lpszAttributes, LPSETUPDLG lpsetupdlg)
 	int			cbKey;
 	char		value[MAXPGPATH];
 
-	CC_conninfo_init(&(lpsetupdlg->ci));
+	CC_conninfo_init(&(lpsetupdlg->ci), COPY_GLOBALS);
 
 	for (lpsz = lpszAttributes; *lpsz; lpsz++)
 	{
@@ -559,13 +579,18 @@ SetDSNAttributes(HWND hwndParent, LPSETUPDLG lpsetupdlg, DWORD *errcode)
  *--------
  */
 static BOOL
-SetDriverAttributes(LPCSTR lpszDriver)
+SetDriverAttributes(LPCSTR lpszDriver, DWORD *pErrorCode, LPSTR message, WORD cbMessage)
 {
 	BOOL	ret = FALSE;
 
 	/* Validate arguments */
 	if (!lpszDriver || !lpszDriver[0])
+	{
+		if (pErrorCode)
+			*pErrorCode = ODBC_ERROR_INVALID_NAME;
+		strncpy_null(message, "Driver name not specified", cbMessage);
 		return FALSE;
+	}
 
 	if (!SQLWritePrivateProfileString(lpszDriver, "APILevel", "1", ODBCINST_INI))
 		goto cleanup;
@@ -586,7 +611,12 @@ SetDriverAttributes(LPCSTR lpszDriver)
 
 	ret = TRUE;
 cleanup:
-
+	if (!ret)
+	{
+		if (pErrorCode)
+			*pErrorCode = ODBC_ERROR_REQUEST_FAILED;
+		strncpy_null(message, "Failed to WritePrivateProfileString", cbMessage);
+	} 
 	return ret;
 }
 

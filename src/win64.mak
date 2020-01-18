@@ -44,6 +44,23 @@ CFG=Release
 !ERROR An invalid configuration was specified.
 !ENDIF 
 
+#
+#	Please replace the default options from the commandline if necessary 
+#
+!IFNDEF	CUSTOMCLOPT
+CUSTOMCLOPT=/nologo /MD /W3 /wd4018 /EHsc
+!ELSE
+!MESSAGE CL option $(CUSTOMCLOPT) specified
+!ENDIF 
+
+#
+#	Please specify additional libraries to link from the command line.
+#	For example specify
+#		CUSTOMLINKLIBS=bufferoverflowu.lib
+#	  when bufferoverflowu.lib is needed in old VC environment. 	
+#
+CUSTOMLINKLIBS=
+
 ADD_DEFINES=/D _WIN64
 #
 #	Include libraries as well as import libraries
@@ -51,23 +68,23 @@ ADD_DEFINES=/D _WIN64
 #	Please set PG_INC, PG_LIB, SSL_INC or PG_LIB
 #	variables to appropriate ones. 
 #
-!IF "$(PG_INC)" == ""
-PG_INC=$(PROGRAMFILES)\PostgreSQL\9.1\include
+!IFNDEF PG_INC
+PG_INC=$(PROGRAMFILES)\PostgreSQL\9.3\include
 !MESSAGE Using default PostgreSQL Include directory: $(PG_INC)
 !ENDIF
 
-!IF "$(PG_LIB)" == ""
+!IFNDEF PG_LIB
 PG_LIB=C:\develop\lib\$(CPU)
 !MESSAGE Using default PostgreSQL Library directory: $(PG_LIB)
 !ENDIF
 
 !IF "$(USE_LIBPQ)" != "no"
-!IF "$(SSL_INC)" == ""
+!IFNDEF SSL_INC
 SSL_INC=C:\OpenSSL\include
 !MESSAGE Using default OpenSSL Include directory: $(SSL_INC)
 !ENDIF
 
-!IF "$(SSL_LIB)" == ""
+!IFNDEF SSL_LIB
 SSL_LIB=C:\develop\lib\$(CPU)
 !MESSAGE Using default OpenSSL Library directory: $(SSL_LIB)
 !ENDIF
@@ -141,6 +158,9 @@ INC_OPT = $(INC_OPT) /I "$(PG_INC)"
 !ENDIF
 !IF "$(SSL_INC)" != ""
 INC_OPT = $(INC_OPT) /I "$(SSL_INC)"
+!ENDIF
+!IF "$(GSS_INC)" != ""
+INC_OPT = $(INC_OPT) /I "$(GSS_INC)"
 !ENDIF
 !IF "$(ADDL_INC)" != ""
 INC_OPT = $(INC_OPT) /I "$(ADD_INC)"
@@ -221,7 +241,7 @@ CLEAN :
 !ENDIF
 
 CPP=cl.exe
-CPP_PROJ=/nologo /MD /W3 /EHsc $(INC_OPT) /D "WIN32" /D "_WINDOWS" /D "_MBCS" /D "_USRDLL" /D "_CRT_SECURE_NO_DEPRECATE" /D "PSQLODBC_EXPORTS" /D "WIN_MULTITHREAD_SUPPORT" $(ADD_DEFINES) /Fp"$(INTDIR)\psqlodbc.pch" /Fo"$(INTDIR)\\" /Fd"$(INTDIR)\\" /FD 
+CPP_PROJ=$(CUSTOMCLOPT) $(INC_OPT) /D "WIN32" /D "_WINDOWS" /D "_MBCS" /D "_USRDLL" /D "_CRT_SECURE_NO_DEPRECATE" /D "PSQLODBC_EXPORTS" /D "WIN_MULTITHREAD_SUPPORT" $(ADD_DEFINES) /Fp"$(INTDIR)\psqlodbc.pch" /Fo"$(INTDIR)\\" /Fd"$(INTDIR)\\" /FD 
 !IF  "$(CFG)" == "Release"
 CPP_PROJ=$(CPP_PROJ) /O2 /D "NDEBUG"
 !ELSEIF  "$(CFG)" == "Debug"
@@ -275,7 +295,7 @@ BSC32_SBRS= \
 	
 LINK32=link.exe
 LIB32=lib.exe
-LINK32_FLAGS=kernel32.lib user32.lib gdi32.lib advapi32.lib odbc32.lib odbccp32.lib wsock32.lib ws2_32.lib XOleHlp.lib winmm.lib "$(OUTDIR)\$(DTCLIB).lib" msvcrt.lib bufferoverflowu.lib /nologo /dll /machine:$(CPU) /def:"$(DEF_FILE)"
+LINK32_FLAGS=kernel32.lib user32.lib gdi32.lib advapi32.lib odbc32.lib odbccp32.lib wsock32.lib ws2_32.lib XOleHlp.lib winmm.lib "$(OUTDIR)\$(DTCLIB).lib" msvcrt.lib $(CUSTOMLINKLIBS) /nologo /dll /machine:$(CPU) /def:"$(DEF_FILE)"
 !IF  "$(ANSI_VERSION)" == "yes"
 DEF_FILE= "psqlodbca.def"
 !ELSE
@@ -289,6 +309,9 @@ LINK32_FLAGS=$(LINK32_FLAGS) /incremental:yes /debug /pdbtype:sept
 LINK32_FLAGS=$(LINK32_FLAGS) "$(VC07_DELAY_LOAD)"
 !IF "$(PG_LIB)" != ""
 LINK32_FLAGS=$(LINK32_FLAGS) /libpath:"$(PG_LIB)"
+!ENDIF
+!IF "$(GSS_LIB)" != ""
+LINK32_FLAGS=$(LINK32_FLAGS) /libpath:"$(GSS_LIB)"
 !ENDIF
 !IF "$(SSL_LIB)" != ""
 LINK32_FLAGS=$(LINK32_FLAGS) /libpath:"$(SSL_LIB)"
@@ -348,12 +371,12 @@ LINK32_OBJS= \
 DTCDEF_FILE= "$(DTCLIB).def"
 LIB32_DTCLIBFLAGS=/nologo /machine:$(CPU) /def:"$(DTCDEF_FILE)"
 
-LINK32_DTCFLAGS=kernel32.lib user32.lib gdi32.lib winspool.lib comdlg32.lib advapi32.lib shell32.lib uuid.lib wsock32.lib XOleHlp.lib $(OUTDIR)\$(MAINLIB).lib bufferoverflowu.lib Delayimp.lib /DelayLoad:XOLEHLP.DLL /nologo /dll /incremental:no /machine:$(CPU)
+LINK32_DTCFLAGS=kernel32.lib user32.lib gdi32.lib winspool.lib comdlg32.lib advapi32.lib shell32.lib uuid.lib wsock32.lib XOleHlp.lib $(OUTDIR)\$(MAINLIB).lib $(CUSTOMLINKLIBS) Delayimp.lib /DelayLoad:XOLEHLP.DLL /nologo /dll /incremental:no /machine:$(CPU)
 LINK32_DTCOBJS= \
         "$(INTDIR)\msdtc_enlist.obj" "$(INTDIR)\xalibname.obj"
 
 XADEF_FILE= "$(XALIB).def"
-LINK32_XAFLAGS=/nodefaultlib:libcmt.lib kernel32.lib user32.lib gdi32.lib advapi32.lib odbc32.lib odbccp32.lib wsock32.lib XOleHlp.lib winmm.lib msvcrt.lib bufferoverflowu.lib /nologo /dll /incremental:no /machine:$(CPU) /def:"$(XADEF_FILE)"
+LINK32_XAFLAGS=/nodefaultlib:libcmt.lib kernel32.lib user32.lib gdi32.lib advapi32.lib odbc32.lib odbccp32.lib wsock32.lib XOleHlp.lib winmm.lib msvcrt.lib $(CUSTOMLINKLIBS) /nologo /dll /incremental:no /machine:$(CPU) /def:"$(XADEF_FILE)"
 LINK32_XAOBJS= \
 	"$(INTDIR)\pgxalib.obj" 
 

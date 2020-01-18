@@ -9,11 +9,12 @@
  *
  * API functions:	SQLAllocEnv, SQLFreeEnv, SQLError
  *
- * Comments:		See "notice.txt" for copyright and license information.
+ * Comments:		See "readme.txt" for copyright and license information.
  *-------
  */
 
 #include "environ.h"
+#include "misc.h"
 
 #include "connection.h"
 #include "dlg_specific.h"
@@ -105,9 +106,6 @@ PGAPI_FreeEnv(HENV henv)
 
 	if (env && EN_Destructor(env))
 	{
-#ifdef	_HANDLE_ENLIST_IN_DTC_
-		CALL_DtcOnRelease();
-#endif /* _HANDLE_ENLIST_IN_DTC_ */
 		mylog("   ok\n");
 		goto cleanup;
 	}
@@ -583,6 +581,7 @@ EN_Destructor(EnvironmentClass *self)
 	 */
 
 	/* Free any connections belonging to this environment */
+	ENTER_CONNS_CS;
 	for (lf = 0, nullcnt = 0; lf < conns_count; lf++)
 	{
 		if (NULL == conns[lf])
@@ -603,6 +602,7 @@ EN_Destructor(EnvironmentClass *self)
 		conns = NULL;
 		conns_count = 0;
 	}
+	LEAVE_CONNS_CS;
 	DELETE_ENV_CS(self);
 	free(self);
 

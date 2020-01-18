@@ -8,7 +8,7 @@
  *
  * API functions:	SQLAllocStmt, SQLFreeStmt
  *
- * Comments:		See "notice.txt" for copyright and license information.
+ * Comments:		See "readme.txt" for copyright and license information.
  *-------
  */
 
@@ -19,6 +19,7 @@
 #endif /* WIN_MULTITHREAD_SUPPORT */
 
 #include "statement.h"
+#include "misc.h" // strncpy_null
 
 #include "bind.h"
 #include "connection.h"
@@ -26,6 +27,7 @@
 #include "qresult.h"
 #include "convert.h"
 #include "environ.h"
+#include "loadlib.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -37,7 +39,7 @@
 #define PRN_NULLCHECK
 
 /*	Map sql commands to statement types */
-static struct
+static const struct
 {
 	int			type;
 	char	   *s;
@@ -140,6 +142,14 @@ static struct
 	,{
 		STMT_TYPE_EXPLAIN, "EXPLAIN"
 	}
+
+	/*
+	 * Special-commands that cannot be run in a transaction block. This isn't
+	 * as granular as it could be. VACUUM can never be run in a transaction
+	 * block, but some variants of REINDEX and CLUSTER can be. CHECKPOINT
+	 * doesn't throw an error if you do, but it cannot be rolled back so
+	 * there's no point in beginning a new transaction for it.
+	 */
 	,{
 		STMT_TYPE_SPECIAL, "VACUUM"
 	}
@@ -152,6 +162,7 @@ static struct
 	,{
 		STMT_TYPE_SPECIAL, "CHECKPOINT"
 	}
+
 	,{
 		STMT_TYPE_WITH, "WITH"
 	}
@@ -169,7 +180,6 @@ PGAPI_AllocStmt(HDBC hdbc,
 	ConnectionClass *conn = (ConnectionClass *) hdbc;
 	StatementClass *stmt;
 	ARDFields	*ardopts;
-	BindInfoClass	*bookmark;
 
 	mylog("%s: entering...\n", func);
 
@@ -214,7 +224,7 @@ PGAPI_AllocStmt(HDBC hdbc,
 		InitializeARDFields(&stmt->ardi.ardopts);
 	}
 	ardopts = SC_get_ARDF(stmt);
-	bookmark = ARD_AllocBookmark(ardopts);
+	ARD_AllocBookmark(ardopts);
 
 	stmt->stmt_size_limit = CC_get_max_query_len(conn);
 	/* Save the handle for later */
@@ -408,6 +418,7 @@ SC_Constructor(ConnectionClass *conn)
 		rv->statement_type = STMT_TYPE_UNKNOWN;
 
 		rv->currTuple = -1;
+		rv->rowset_start = 0;
 		SC_set_rowset_start(rv, -1, FALSE);
 		rv->current_col = -1;
 		rv->bind_row = 0;
@@ -522,6 +533,41 @@ SC_Destructor(StatementClass *self)
 	return TRUE;
 }
 
+void
+SC_init_Result(StatementClass *self)
+{
+	self->result = self->curres = NULL;
+	self->curr_param_result = 0;
+	mylog("SC_init_Result(%x)", self);
+}
+
+void
+SC_set_Result(StatementClass *self, QResultClass *res)
+{
+	if (res != self->result)
+	{
+		mylog("SC_set_Result(%x, %x)", self, res);
+		QR_Destructor(self->result);
+		self->result = self->curres = res;
+		if (NULL != res)
+			self->curr_param_result = 1;
+	}
+}
+
+void
+SC_forget_unnamed(StatementClass *self)
+{
+	if (PREPARED_TEMPORARILY == self->prepared)
+	{
+		SC_set_prepared(self, ONCE_DESCRIBED);
+		if (FALSE && !SC_IsExecuting(self))
+		{
+			QResultClass	*res = SC_get_Curres(self);
+			if (NULL != res && !res->dataFilled && !QR_is_fetching_tuples(res))
+				SC_set_Result(self, NULL);
+		}
+	}
+}
 
 /*
  *	Free parameters and free the memory from the
@@ -796,7 +842,9 @@ SC_recycle_statement(StatementClass *self)
 			if (CC_loves_visible_trans(conn) && CC_is_in_trans(conn))
 			{
 				if (SC_is_pre_executable(self) && !SC_is_parse_tricky(self))
-					/* CC_abort(conn) */;
+				{
+					/* CC_abort(conn); */
+				}
 			}
 			break;
 
@@ -919,7 +967,7 @@ SC_scanQueryAndCountParams(const char *query, const ConnectionClass *conn,
 		}
 		if (!multi && del_found)
 		{
-			if (!isspace(tchar))
+			if (!isspace((UCHAR) tchar))
 			{
 				multi = TRUE;
 				if (next_cmd)
@@ -1034,7 +1082,7 @@ SC_scanQueryAndCountParams(const char *query, const ConnectionClass *conn,
 					comment_level++;
 				}
 			}
-			if (!isspace(tchar))
+			if (!isspace((UCHAR) tchar))
 				bchar = tchar;
 		}
 	}
@@ -1077,11 +1125,11 @@ SC_pre_execute(StatementClass *self)
 			{
 				case NAMED_PARSE_REQUEST:
 				case PARSE_TO_EXEC_ONCE:
-					if (SQL_SUCCESS != prepareParameters(self, TRUE))
+					if (SQL_SUCCESS != prepareParameters(self))
 						return num_fields;
 					break;
 				case PARSE_REQ_FOR_INFO:
-					if (SQL_SUCCESS != prepareParameters(self, TRUE))
+					if (SQL_SUCCESS != prepareParameters(self))
 						return num_fields;
 					self->status = STMT_PREMATURE;
 					self->inaccurate_result = TRUE;
@@ -1171,7 +1219,7 @@ SC_clear_error(StatementClass *self)
  */
 
 /*	Map sql commands to statement types */
-static struct
+static const struct
 {
 	int	number;
 	const	char	* ver3str;
@@ -1806,7 +1854,7 @@ SC_execute(StatementClass *self)
 	BOOL		is_in_trans, issue_begin, has_out_para;
 	BOOL		use_extended_protocol;
 	int		func_cs_count = 0, i;
-	BOOL		useCursor;
+	BOOL		useCursor, isSelectType;
 
 	conn = SC_get_conn(self);
 	ci = &(conn->connInfo);
@@ -1831,11 +1879,12 @@ SC_execute(StatementClass *self)
 		goto cleanup;
 	}
 	is_in_trans = CC_is_in_trans(conn);
-	if (useCursor = SC_is_fetchcursor(self))
+	if ((useCursor = SC_is_fetchcursor(self)))
 	{
 		QResultClass *curres = SC_get_Curres(self);
 
-		if (NULL != curres)
+		if (NULL != curres &&
+		    curres->dataFilled)
 			useCursor = (NULL != QR_get_cursor(curres));
 	} 
 	/* issue BEGIN ? */
@@ -1857,15 +1906,22 @@ SC_execute(StatementClass *self)
 	    /* || SC_is_with_hold(self) thiw would lose the performance */
 		 ))
 		issue_begin = FALSE;
-	else
+	else if (self->statement_type == STMT_TYPE_SPECIAL)
 	{
-		switch (self->statement_type)
-		{
-			case STMT_TYPE_START:
-			case STMT_TYPE_SPECIAL:
-				issue_begin = FALSE;
-				break;
-		}
+		/*
+		 * Some utility commands like VACUUM cannot be run in a transaction
+		 * block, so don't begin one even if auto-commit mode is disabled.
+		 *
+		 * An application should never issue an explicit BEGIN when
+		 * auto-commit mode is disabled (probably not even when it's enabled,
+		 * actually). We used to also suppress the implicit BEGIN when the
+		 * statement was of STMT_TYPE_START type, ie. if the application
+		 * issued an explicit BEGIN, but that actually seems like a bad idea.
+		 * First of all, if you issue a BEGIN twice the backend will give a
+		 * warning which can be helpful to spot mistakes in the application
+		 * (because it shouldn't be doing that).
+		 */
+		issue_begin = FALSE;
 	}
 	if (issue_begin)
 	{
@@ -1913,14 +1969,22 @@ SC_execute(StatementClass *self)
 #endif /* BYPASS_ONESHOT_PLAN_EXECUTION */
 					case NAMED_PARSE_REQUEST:
 						use_extended_protocol = TRUE;
+						break;
 				}
 			}
-			if (!use_extended_protocol)
+			if (use_extended_protocol)
+				break;
+			/* fall through */
+		case ONCE_DESCRIBED:
+			SC_forget_unnamed(self);
 			{
-				SC_forget_unnamed(self);
-				SC_set_Result(self, NULL); /* discard the parsed information */
+				QResultClass	*pres = SC_get_Result(self);
+				if (NULL != pres && NULL == QR_get_command(pres))
+					SC_set_Result(self, NULL); /* discard the parsed information */
 			}
+			break;
 	}
+	isSelectType = (SC_may_use_cursor(self) || self->statement_type == STMT_TYPE_PROCCALL);
 	if (use_extended_protocol)
 	{
 		char	*plan_name = self->plan_name;
@@ -1951,8 +2015,7 @@ inolog("get_Result=%p %p %d\n", res, SC_get_Result(self), self->curr_param_resul
 			goto cleanup;
 		}
 	}
-	else if (self->statement_type == STMT_TYPE_SELECT ||
-		 self->statement_type == STMT_TYPE_PROCCALL)
+	else if (isSelectType)
 	{
 		char		fetch[128];
 		const char *appendq = NULL;
@@ -1993,7 +2056,7 @@ inolog("get_Result=%p %p %d\n", res, SC_get_Result(self), self->curr_param_resul
 					qres = nres;
 				}
 			}	
-			if (SC_is_with_hold(self))
+			if (res && SC_is_with_hold(self))
 				QR_set_withhold(res);
 		}
 		mylog("     done sending the query:\n");
@@ -2003,7 +2066,10 @@ inolog("get_Result=%p %p %d\n", res, SC_get_Result(self), self->curr_param_resul
 		/* not a SELECT statement so don't use a cursor */
 		mylog("      it's NOT a select statement: stmt=%p\n", self);
 		res = CC_send_query(conn, self->stmt_with_params, NULL, qflag, SC_get_ancestor(self));
+	}
 
+	if (!isSelectType)
+	{
 		/*
 		 * We shouldn't send COMMIT. Postgres backend does the autocommit
 		 * if neccessary. (Zoltan, 04/26/2000)
@@ -2103,10 +2169,8 @@ inolog("!!%p->SC_is_concat_pre=%x res=%p\n", self, self->miscinfo, res);
 			{
 				if (tres = res->next, tres)
 				{
-					if (tres->fields)
-						CI_Destructor(tres->fields);
-					tres->fields = res->fields;
-					res->fields = NULL;
+					QR_set_fields(tres, QR_get_fields(res));
+					QR_set_fields(res,  NULL);
 					tres->num_fields = res->num_fields;
 					res->next = NULL;
 					QR_Destructor(res);
@@ -2376,7 +2440,7 @@ SC_log_error(const char *func, const char *desc, const StatementClass *self)
 
 			if (res)
 			{
-				qlog("                 fields=%p, backend_tuples=%p, tupleField=%d, conn=%p\n", res->fields, res->backend_tuples, res->tupleField, res->conn);
+				qlog("                 fields=%p, backend_tuples=%p, tupleField=%d, conn=%p\n", QR_get_fields(res), res->backend_tuples, res->tupleField, res->conn);
 				qlog("                 fetch_count=%d, num_total_rows=%d, num_fields=%d, cursor='%s'\n", res->fetch_number, QR_get_num_total_tuples(res), res->num_fields, nullcheck(QR_get_cursor(res)));
 				qlog("                 message='%s', command='%s', notice='%s'\n", nullcheck(QR_get_message(res)), nullcheck(res->command), nullcheck(res->notice));
 				qlog("                 status=%d, inTuples=%d\n", QR_get_rstatus(res), QR_is_fetching_tuples(res));
@@ -2403,6 +2467,10 @@ RequestStart(StatementClass *stmt, ConnectionClass *conn, const char *func)
 {
 	BOOL	ret = TRUE;
 
+#ifdef	_HANDLE_ENLIST_IN_DTC_
+	if (conn->asdum)
+		CALL_IsolateDtcConn(conn, TRUE);
+#endif /* _HANDLE_ENLIST_IN_DTC_ */
 	if (SC_accessed_db(stmt))
 		return TRUE;
 	if (SQL_ERROR == SetStatementSvp(stmt))
@@ -2413,12 +2481,47 @@ RequestStart(StatementClass *stmt, ConnectionClass *conn, const char *func)
 		SC_set_error(stmt, STMT_INTERNAL_ERROR, emsg, func);
 		return FALSE;
 	}
-	if (!CC_is_in_trans(conn) && CC_loves_visible_trans(conn))
+
+	/*
+	 * In auto-commit mode, begin a new transaction implicitly if no
+	 * transaction is in progress yet. However, some special statements like
+	 * VACUUM and CLUSTER cannot be run in a transaction block.
+	 */
+	if (!CC_is_in_trans(conn) && CC_loves_visible_trans(conn) &&
+		stmt->statement_type != STMT_TYPE_SPECIAL)
 	{
-		if (ret = CC_begin(conn), !ret)
-			return ret;
+		ret = CC_begin(conn);
 	}
 	return ret;
+}
+
+/*
+ * Copies the column information from the first result set of 'self' to 'res'.
+ */
+static BOOL
+ReflectColumnsInfo(StatementClass *self, QResultClass *res)
+{
+	QResultClass	*pres;
+
+	if (NOT_YET_PREPARED == self->prepared)
+		return FALSE;
+	if (res->num_fields > 0)
+		return FALSE;
+	pres = SC_get_Result(self);
+	if (pres != res &&
+	    pres->num_fields > 0)
+	{
+		QR_set_fields(res, QR_get_fields(pres));
+		QR_set_conn(res, SC_get_conn(self));
+		if (QR_haskeyset(pres))
+			QR_set_haskeyset(res);
+		if (QR_is_withhold(pres))
+			QR_set_withhold(res);
+		res->num_fields = pres->num_fields;
+
+		return TRUE;
+	}
+	return FALSE;
 }
 
 BOOL
@@ -2448,7 +2551,7 @@ QResultClass *SendSyncAndReceive(StatementClass *stmt, QResultClass *res, const 
 	int		num_p, num_io_params;
 	int		i, pidx;
 	Int2		num_discard_params, paramType;
-	BOOL		rcvend = FALSE, loopend = FALSE, msg_truncated;
+	BOOL		rcvend = FALSE, loopend = FALSE;
 	char		msgbuffer[ERROR_MSG_LENGTH + 1];
 	IPDFields	*ipdopts;
 	QResultClass	*newres = NULL;
@@ -2501,11 +2604,11 @@ inolog(" response_length=%d\n", response_length);
 				}
 				break;
 			case 'E': /* ErrorMessage */
-				msg_truncated = handle_error_message(conn, msgbuffer, sizeof(msgbuffer), res->sqlstate, comment, res);
+				handle_error_message(conn, msgbuffer, sizeof(msgbuffer), res->sqlstate, comment, res);
 
 				break;
 			case 'N': /* Notice */
-				msg_truncated = handle_notice_message(conn, msgbuffer, sizeof(msgbuffer), res->sqlstate, comment, res);
+				handle_notice_message(conn, msgbuffer, sizeof(msgbuffer), res->sqlstate, comment, res);
 				break;
 			case '1': /* ParseComplete */
 				if (stmt->plan_name)
@@ -2591,7 +2694,7 @@ inolog("num_params=%d info=%d\n", stmt->num_params, num_p);
 					int	cidx;
 
 					QR_set_rstatus(res, PORES_FIELDS_OK);
-					res->num_fields = CI_get_num_fields(res->fields);
+					res->num_fields = CI_get_num_fields(QR_get_fields(res));
 					if (QR_haskeyset(res))
 						res->num_fields -= res->num_key_fields;
 					num_io_params = CountParameters(stmt, NULL, &dummy1, &dummy2);
@@ -2608,8 +2711,8 @@ inolog("num_params=%d info=%d\n", stmt->num_params, num_p);
  							if (SQL_PARAM_OUTPUT == paramType ||
 							    SQL_PARAM_INPUT_OUTPUT == paramType)
 							{
-inolog("!![%d].PGType %u->%u\n", i, PIC_get_pgtype(ipdopts->parameters[i]), CI_get_oid(res->fields, cidx));
-								PIC_set_pgtype(ipdopts->parameters[i], CI_get_oid(res->fields, cidx));
+inolog("!![%d].PGType %u->%u\n", i, PIC_get_pgtype(ipdopts->parameters[i]), CI_get_oid(QR_get_fields(res), cidx));
+								PIC_set_pgtype(ipdopts->parameters[i], CI_get_oid(QR_get_fields(res), cidx));
 								cidx++;
 							}
 						}
@@ -2632,6 +2735,7 @@ inolog("!![%d].PGType %u->%u\n", i, PIC_get_pgtype(ipdopts->parameters[i]), CI_g
 				break;
 			case 'B': /* Binary data */
 			case 'D': /* ASCII data */
+				ReflectColumnsInfo(stmt, res);
 				if (!QR_get_tupledata(res, id == 'B'))
 				{
 					loopend = TRUE;

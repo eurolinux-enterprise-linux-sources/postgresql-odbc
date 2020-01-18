@@ -12,7 +12,7 @@
  *					SQLProcedureColumns, SQLProcedures,
  *					SQLTablePrivileges, SQLColumnPrivileges(NI)
  *
- * Comments:		See "notice.txt" for copyright and license information.
+ * Comments:		See "readme.txt" for copyright and license information.
  *--------
  */
 
@@ -1479,6 +1479,9 @@ CSTR	like_op_sp = 	"like ";
 CSTR	like_op_ext =	"like E";
 CSTR	eq_op_sp =	"= ";
 CSTR	eq_op_ext =	"= E";
+
+#define	 IS_VALID_NAME(str) ((str) && (str)[0])
+
 static const char *gen_opestr(const char *orig_opestr, const ConnectionClass * conn)
 {
 	BOOL	addE = (0 != CC_get_escape(conn) && PG_VERSION_GE(conn, 8.1));
@@ -1665,8 +1668,14 @@ retry_public_schema:
 			/* strcat(tables_query, " and pg_catalog.pg_table_is_visible(c.oid)"); */
 		}
 		else
-			my_strcat1(tables_query, " and usename %s'%.*s'", op_string, escSchemaName, SQL_NTS);
-		my_strcat1(tables_query, " and relname %s'%.*s'", op_string, escTableName, SQL_NTS);
+		{
+			if (IS_VALID_NAME(escSchemaName))
+				snprintf_add(tables_query, sizeof(tables_query),
+						 " and usename %s'%s'", op_string, escSchemaName);
+		}
+		if (IS_VALID_NAME(escTableName))
+			snprintf_add(tables_query, sizeof(tables_query),
+					 " and relname %s'%s'", op_string, escTableName);
 	}
 
 	/* Parse the extra systable prefix	*/
@@ -1677,7 +1686,7 @@ retry_public_schema:
 #else
 	prefix[i] = strtok(prefixes, ";");
 #endif /* HAVE_STRTOK_R */
-	while (i < sizeof(prefix) && prefix[i])
+	while (i < sizeof(prefix) / sizeof(char *) && prefix[i])
 #ifdef	HAVE_STRTOK_R
 		prefix[++i] = strtok_r(NULL, ";", &last);
 #else
@@ -1711,7 +1720,7 @@ retry_public_schema:
 #else
 		table_type[i] = strtok(table_types, ",");
 #endif /* HAVE_STRTOK_R */
-		while (i < sizeof(table_type) && table_type[i])
+		while (i < sizeof(table_type) / sizeof(char *) && table_type[i])
 #ifdef	HAVE_STRTOK_R
 			table_type[++i] = strtok_r(NULL, ",", &last);
 #else
@@ -1722,7 +1731,7 @@ retry_public_schema:
 		i = 0;
 		while (table_type[i])
 		{
-			char *typestr = table_type[i];
+			UCHAR *typestr = (UCHAR *) table_type[i];
 
 			while (isspace(*typestr))
 				typestr++;
@@ -2143,10 +2152,14 @@ retry_public_schema:
 			"  and a.atttypid = t.oid and (a.attnum > 0)",
 			PG_VERSION_LE(conn, 6.2) ? "a.attlen" : "a.atttypmod");
 		if (escTableName)
-			snprintf_add(columns_query, sizeof(columns_query), " and c.relname %s'%s'", op_string, escTableName);
-		my_strcat1(columns_query, " and u.usename %s'%.*s'", op_string, escSchemaName, SQL_NTS);
+			snprintf_add(columns_query, sizeof(columns_query),
+						 " and c.relname %s'%s'", op_string, escTableName);
+		if (IS_VALID_NAME(escSchemaName))
+			snprintf_add(columns_query, sizeof(columns_query),
+					 " and u.usename %s'%s'", op_string, escSchemaName);
 		if (escColumnName)
-			snprintf_add(columns_query, sizeof(columns_query), " and a.attname %s'%s'", op_string, escColumnName);
+			snprintf_add(columns_query, sizeof(columns_query),
+						 " and a.attname %s'%s'", op_string, escColumnName);
 		strcat(columns_query, " order by c.relname, attnum");
 	}
 
@@ -2756,7 +2769,6 @@ PGAPI_SpecialColumns(
 	StatementClass *stmt = (StatementClass *) hstmt;
 	ConnectionClass *conn;
 	QResultClass	*res;
-	ConnInfo   *ci;
 	HSTMT		hcol_stmt = NULL;
 	StatementClass *col_stmt;
 	char		columns_query[INFO_INQUIRY_LEN];
@@ -2772,7 +2784,6 @@ PGAPI_SpecialColumns(
 	if (result = SC_initialize_and_recycle(stmt), SQL_SUCCESS != result)
 		return result;
 	conn = SC_get_conn(stmt);
-	ci = &(conn->connInfo);
 #ifdef	UNICODE_SUPPORT
 	if (CC_is_in_unicode_driver(conn))
 		internal_asis_type = INTERNAL_ASIS_TYPE;
@@ -2811,12 +2822,17 @@ retry_public_schema:
 	/* TableName cannot contain a string search pattern */
 	/* my_strcat(columns_query, " and c.relname = '%.*s'", szTableName, cbTableName); */
 	if (escTableName)
-		snprintf_add(columns_query, sizeof(columns_query), " and c.relname %s'%s'", eq_string, escTableName);
+		snprintf_add(columns_query, sizeof(columns_query),
+					 " and c.relname %s'%s'", eq_string, escTableName);
 	/* SchemaName cannot contain a string search pattern */
 	if (conn->schema_support)
 		schema_strcat1(columns_query, " and u.nspname %s'%.*s'", eq_string, escSchemaName, SQL_NTS, szTableName, cbTableName, conn);
 	else
-		my_strcat1(columns_query, " and u.usename %s'%.*s'", eq_string, escSchemaName, SQL_NTS);
+	{
+		if (IS_VALID_NAME(escSchemaName))
+			snprintf_add(columns_query, sizeof(columns_query),
+					 " and u.usename %s'%s'", eq_string, escSchemaName);
+	}
 
 
 	result = PGAPI_AllocStmt(conn, &hcol_stmt, 0);
@@ -2956,19 +2972,16 @@ inolog("Add ctid\n");
 		{
 			Int2		the_type = PG_TYPE_XID;
 
-			/* if (atoi(ci->row_versioning)) */
-			{
-				tuple = QR_AddNew(res);
+			tuple = QR_AddNew(res);
 
-				set_tuplefield_null(&tuple[0]);
-				set_tuplefield_string(&tuple[1], "xmin");
-				set_tuplefield_int2(&tuple[2], pgtype_to_concise_type(stmt, the_type, PG_STATIC));
-				set_tuplefield_string(&tuple[3], pgtype_to_name(stmt, the_type, PG_UNSPECIFIED, FALSE));
-				set_tuplefield_int4(&tuple[4], pgtype_column_size(stmt, the_type, PG_STATIC, UNKNOWNS_AS_DEFAULT));
-				set_tuplefield_int4(&tuple[5], pgtype_buffer_length(stmt, the_type, PG_STATIC, UNKNOWNS_AS_DEFAULT));
-				set_tuplefield_int2(&tuple[6], pgtype_decimal_digits(stmt, the_type, PG_STATIC));
-				set_tuplefield_int2(&tuple[7], SQL_PC_PSEUDO);
-			}
+			set_tuplefield_null(&tuple[0]);
+			set_tuplefield_string(&tuple[1], "xmin");
+			set_tuplefield_int2(&tuple[2], pgtype_to_concise_type(stmt, the_type, PG_STATIC));
+			set_tuplefield_string(&tuple[3], pgtype_to_name(stmt, the_type, PG_UNSPECIFIED, FALSE));
+			set_tuplefield_int4(&tuple[4], pgtype_column_size(stmt, the_type, PG_STATIC, UNKNOWNS_AS_DEFAULT));
+			set_tuplefield_int4(&tuple[5], pgtype_buffer_length(stmt, the_type, PG_STATIC, UNKNOWNS_AS_DEFAULT));
+			set_tuplefield_int2(&tuple[6], pgtype_decimal_digits(stmt, the_type, PG_STATIC));
+			set_tuplefield_int2(&tuple[7], SQL_PC_PSEUDO);
 		}
 	}
 
@@ -4490,6 +4503,7 @@ PGAPI_ForeignKeys_old(
 				}
 				if (pkey_alloced)
 					free(pkey_text);
+				pkey_alloced = FALSE;
 				/* Get to next primary key */
 				for (k = 0; k < 2; k++)
 					pkey_ptr += strlen(pkey_ptr) + 1;
@@ -5022,7 +5036,7 @@ PGAPI_ProcedureColumns(
 	TupleField	*tuple;
 	char		*schema_name, *procname;
 	char		*escSchemaName = NULL, *escProcName = NULL;
-	char		*params, *proargnames, *proargmodes, *delim = NULL;
+	UCHAR		*params, *proargnames, *proargmodes, *delim = NULL;
 	char		*atttypid, *attname, *column_name;
 	QResultClass *res, *tres;
 	SQLLEN		tcount;
@@ -5092,11 +5106,17 @@ PGAPI_ProcedureColumns(
 				   " p.pronamespace = n.oid  and"
 				   " (not proretset) and");
 #endif /* PRORET_COUNT */
-		strcat(proc_query, " has_function_privilege(p.oid, 'EXECUTE')");
-		my_strcat1(proc_query, " and nspname %s'%.*s'", op_string, escSchemaName, SQL_NTS);
+		snprintf_add(proc_query, sizeof(proc_query),
+					 " has_function_privilege(p.oid, 'EXECUTE')");
+		if (IS_VALID_NAME(escSchemaName))
+			snprintf_add(proc_query, sizeof(proc_query),
+					 " and nspname %s'%s'",
+					 op_string, escSchemaName);
 		if (escProcName)
-			snprintf_add(proc_query, sizeof(proc_query), " and proname %s'%s'", op_string, escProcName);
-		strcat(proc_query, " order by nspname, proname, p.oid, attnum");
+			snprintf_add(proc_query, sizeof(proc_query),
+						 " and proname %s'%s'", op_string, escProcName);
+		snprintf_add(proc_query, sizeof(proc_query),
+					 " order by nspname, proname, p.oid, attnum");
 	}
 	else
 	{
@@ -5106,7 +5126,8 @@ PGAPI_ProcedureColumns(
 		ret_col = 5;
 		if (escProcName)
 			snprintf_add(proc_query, sizeof(proc_query), " and proname %s'%s'", op_string, escProcName);
-		strcat(proc_query, " order by proname, proretset");
+		snprintf_add(proc_query, sizeof(proc_query),
+					 " order by proname, proretset");
 	}
 	if (tres = CC_send_query(conn, proc_query, NULL, IGNORE_ABORT_ON_CONN, stmt), !QR_command_maybe_successful(tres))
 	{
@@ -5469,16 +5490,22 @@ PGAPI_Procedures(
 		   " pg_catalog.pg_proc"
 		  " where pg_proc.pronamespace = pg_namespace.oid");
 		schema_strcat1(proc_query, " and nspname %s'%.*s'", op_string, escSchemaName, SQL_NTS, szProcName, cbProcName, conn);
-		my_strcat1(proc_query, " and proname %s'%.*s'", op_string, escProcName, SQL_NTS);
+		if (IS_VALID_NAME(escProcName))
+			snprintf_add(proc_query, sizeof(proc_query),
+					 " and proname %s'%s'", op_string, escProcName);
 	}
 	else
 	{
-		strcpy(proc_query, "select '' as " "PROCEDURE_CAT" ", '' as " "PROCEDURE_SCHEM" ","
-		" proname as " "PROCEDURE_NAME" ", '' as " "NUM_INPUT_PARAMS" ","
-		   " '' as " "NUM_OUTPUT_PARAMS" ", '' as " "NUM_RESULT_SETS" ","
-		   " '' as " "REMARKS" ","
-		   " case when prorettype = 0 then 1::int2 else 2::int2 end as " "PROCEDURE_TYPE" " from pg_proc");
-		my_strcat1(proc_query, " where proname %s'%.*s'", op_string, escSchemaName, SQL_NTS);
+		snprintf(proc_query, sizeof(proc_query),
+				 "select '' as " "PROCEDURE_CAT" ", '' as " "PROCEDURE_SCHEM" ","
+				 " proname as " "PROCEDURE_NAME" ", '' as " "NUM_INPUT_PARAMS" ","
+				 " '' as " "NUM_OUTPUT_PARAMS" ", '' as " "NUM_RESULT_SETS" ","
+				 " '' as " "REMARKS" ","
+				 " case when prorettype = 0 then 1::int2 else 2::int2 end as " "PROCEDURE_TYPE" " from pg_proc");
+		if (IS_VALID_NAME(escSchemaName))
+			snprintf_add(proc_query, sizeof(proc_query),
+				 " where proname %s'%s'",
+				 op_string, escSchemaName);
 	}
 
 	if (res = CC_send_query(conn, proc_query, NULL, IGNORE_ABORT_ON_CONN, stmt), !QR_command_maybe_successful(res))

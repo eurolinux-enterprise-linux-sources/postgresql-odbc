@@ -2,7 +2,7 @@
  *
  * Description:		See "bind.c"
  *
- * Comments:		See "notice.txt" for copyright and license information.
+ * Comments:		See "readme.txt" for copyright and license information.
  *
  */
 
@@ -63,7 +63,7 @@ typedef struct
 }	PutDataClass;
 
 /*
- * ParameterImplClass -- stores implemntation information about a parameter
+ * ParameterImplClass -- stores implementation information about a parameter
  */
 struct ParameterImplClass_
 {
@@ -111,7 +111,7 @@ void	reset_a_putdata_info(PutDataInfo *pdata, int ipar);
 void	PDATA_free_params(PutDataInfo *pdata, char option);
 void	SC_param_next(const StatementClass*, int *param_number, ParameterInfoClass **, ParameterImplClass **);
 
-RETCODE       prepareParameters(StatementClass *stmt, BOOL sync);
+RETCODE       prepareParameters(StatementClass *stmt);
 int	decideHowToPrepare(StatementClass *stmt, BOOL force);
 
 #endif

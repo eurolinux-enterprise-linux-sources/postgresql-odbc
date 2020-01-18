@@ -1,5 +1,5 @@
 /*-------
- * Module:			sspi_proc.c
+ * Module:			sspisvcs.c
  *
  * Description:		This module contains functions for low level socket
  *					operations (connecting/reading/writing to the backend)
@@ -8,7 +8,7 @@
  *
  * API functions:	none
  *
- * Comments:		See "notice.txt" for copyright and license information.
+ * Comments:		See "readme.txt" for copyright and license information.
  *-------
  */
 
@@ -22,6 +22,8 @@
 
 #include "sspisvcs.h"
 #include "socket.h"
+#include "connection.h"
+#include "environ.h"
 
 /*
  *	To handle EWOULDBLOCK etc (mainly for libpq non-blocking connection).
@@ -150,9 +152,9 @@ typedef struct {
 	KerberosEtcSpec	kdata;
 } SspiData;
 
-static int DoSchannelNegotiation(SocketClass *, SspiData *, const void *opt);
-static int DoKerberosNegotiation(SocketClass *, SspiData *, const void *opt);
-static int DoNegotiateNegotiation(SocketClass *, SspiData *, const void *opt);
+static int DoSchannelNegotiation(SocketClass *, SspiData *, const void *opt, int *bReconnect);
+static int DoKerberosNegotiation(SocketClass *, SspiData *, const void *opt, int *bReconnect);
+static int DoNegotiateNegotiation(SocketClass *, SspiData *, const void *opt, int *bReconnect);
 static int DoKerberosEtcProcessAuthentication(SocketClass *, const void *opt);
 
 static SspiData *SspiDataAlloc(SocketClass *self)
@@ -164,21 +166,23 @@ static SspiData *SspiDataAlloc(SocketClass *self)
 	return sspidata;
 }
 
-int StartupSspiService(SocketClass *self, SSPI_Service svc, const void *opt)
+int StartupSspiService(SocketClass *self, SSPI_Service svc, const void *opt, int *bReconnect)
 {
 	CSTR func = "DoServicelNegotiation";
 	SspiData	*sspidata;
 
+	if (bReconnect != NULL)
+		*bReconnect = 0;
 	if (NULL == (sspidata = SspiDataAlloc(self)))
 		return -1;
 	switch (svc)
 	{
 		case SchannelService:
-			return DoSchannelNegotiation(self, sspidata, opt);
+			return DoSchannelNegotiation(self, sspidata, opt, bReconnect);
 		case KerberosService:
-			return DoKerberosNegotiation(self, sspidata, opt);
+			return DoKerberosNegotiation(self, sspidata, opt, bReconnect);
 		case NegotiateService:
-			return DoNegotiateNegotiation(self, sspidata, opt);
+			return DoNegotiateNegotiation(self, sspidata, opt, bReconnect);
 	}
 
 	free(sspidata);
@@ -250,9 +254,329 @@ static SECURITY_STATUS PerformSchannelClientHandshake(SOCKET, PCredHandle, LPSTR
 static SECURITY_STATUS SchannelClientHandshakeLoop(SOCKET, PCredHandle, CtxtHandle *, BOOL, SecBuffer *);
 static void GetNewSchannelClientCredentials(PCredHandle, CtxtHandle *);
 
-static HCERTSTORE	hMyCertStore = NULL;
+static BOOL		bRootCALoaded = FALSE;
+static BOOL		bMyCert = FALSE;
+static HCERTSTORE	hMyCertStore  = NULL;
+static HCRYPTPROV	hProv = (HCRYPTPROV) 0;
+static PCCERT_CONTEXT	pClientCertContext = NULL;
 
-static int DoSchannelNegotiation(SocketClass *self, SspiData *sspidata, const void *opt)
+static void FreeCertStores()
+{
+	shortterm_common_lock();
+	if (pClientCertContext)
+	{
+        	CertFreeCertificateContext(pClientCertContext);
+		pClientCertContext = NULL;
+	}
+	if (hProv)
+	{
+		CryptReleaseContext(hProv, 0);
+		hProv = (HCRYPTPROV) 0;
+	}
+	if (hMyCertStore)
+	{
+		CertCloseStore(hMyCertStore, CERT_CLOSE_STORE_FORCE_FLAG);
+		hMyCertStore = NULL;
+	}
+	shortterm_common_unlock();
+}
+
+void LeaveSSPIService()
+{
+	FreeCertStores();
+	bMyCert = FALSE;
+	bRootCALoaded = FALSE;
+}
+
+/*
+ *	This driver allows certificates of PFX form when a pair of
+ *	postgresql.crt and postgresql.key doesn't work well. 
+ */
+static void CertStoreInit_pfx()
+{
+	BOOL	success = FALSE;
+	LPCTSTR pgsslpfx = NULL;
+	LPCTSTR appdata = NULL;
+	TCHAR	sslpfx[256];
+	HANDLE	fd = INVALID_HANDLE_VALUE;
+	DWORD	flen, rlen;
+	CRYPT_DATA_BLOB	crypt_data;
+
+	if (bMyCert)			return;
+	if (hMyCertStore != NULL)	return;
+
+	bMyCert = TRUE; 
+	pgsslpfx = getenv("PGSSLPFX");
+	if (!pgsslpfx)
+	{
+		if (!appdata)
+			appdata = getenv("APPDATA");
+		if (!appdata)			return;
+		snprintf(sslpfx, sizeof(sslpfx), "%s\\postgresql\\postgresql.pfx", appdata);
+		pgsslpfx = sslpfx;
+	}
+
+	fd = CreateFile(pgsslpfx, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (INVALID_HANDLE_VALUE == fd)
+	{
+		mylog("!!! pfxfile=%s not found\n", pgsslpfx);
+		goto cleanup;
+	}
+	flen = GetFileSize(fd, NULL);
+	if (flen <= 0)
+	{
+		goto cleanup;
+	}
+	crypt_data.cbData = flen;
+	crypt_data.pbData = (LPBYTE) CryptMemAlloc(flen);
+	ReadFile(fd, crypt_data.pbData, flen, &rlen, NULL);
+	CloseHandle(fd);
+	fd = INVALID_HANDLE_VALUE;  
+	hMyCertStore = PFXImportCertStore(&crypt_data, L"", 0);
+	CryptMemFree(crypt_data.pbData);
+
+	success = TRUE;
+cleanup:
+	if (fd != INVALID_HANDLE_VALUE)
+		CloseHandle(fd);
+	if (!success)
+		FreeCertStores();
+}
+
+static void CertStoreInit()
+{
+	BOOL	success = FALSE;
+	LPCTSTR pgsslkey = NULL, pgsslcert = NULL;
+	LPCTSTR appdata = NULL;
+	TCHAR	sslkey[256], sslcert[256];
+	HANDLE	fd = INVALID_HANDLE_VALUE;
+	DWORD	flen, rlen;
+	char	*pemdata = NULL;
+	DWORD	dwBufferLen, cbKeyBlob;
+	LPBYTE	pbBuffer = NULL, pbKeyBlob = NULL;
+	HCRYPTKEY	hKey = (HCRYPTKEY) 0;
+
+	if (hMyCertStore != NULL)	return;
+
+	bMyCert = TRUE; 
+
+	pgsslkey = getenv("PGSSLKEY");
+	if (!pgsslkey)
+	{
+		if (!appdata)
+			appdata = getenv("APPDATA");
+		if (!appdata)			goto cleanup;
+		snprintf(sslkey, sizeof(sslkey), "%s\\postgresql\\postgresql.key", appdata);
+		pgsslkey = sslkey;
+	}
+
+	fd = CreateFile(pgsslkey, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (INVALID_HANDLE_VALUE == fd)
+	{
+		mylog("!!! keyfile=%s not found\n", pgsslkey);
+		goto cleanup;
+	}
+	flen = GetFileSize(fd, NULL);
+	if (flen <= 0)
+	{
+		goto cleanup;
+	}
+	if (pemdata = malloc(flen), NULL == pemdata)
+		goto cleanup;
+	ReadFile(fd, pemdata, flen, &rlen, NULL);
+	CloseHandle(fd);
+	fd = INVALID_HANDLE_VALUE;
+  
+	if (!CryptStringToBinaryA(pemdata, 0, CRYPT_STRING_BASE64HEADER,
+		NULL, &dwBufferLen, NULL, NULL))
+	{
+		mylog("Failed to convert BASE64 private key. Error 0x%.8X\n",
+GetLastError());
+		goto cleanup;
+	}
+	if (pbBuffer = malloc(dwBufferLen), NULL == pbBuffer)
+		goto cleanup;
+	if (!CryptStringToBinaryA(pemdata, 0, CRYPT_STRING_BASE64HEADER,
+		pbBuffer, &dwBufferLen, NULL, NULL))
+	{
+		mylog("Failed to convert BASE64 private key. Error 0x%.8X\n", GetLastError());
+		goto cleanup;
+	}
+	free(pemdata);
+	pemdata = NULL;
+
+	if (!CryptDecodeObjectEx(X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
+		PKCS_RSA_PRIVATE_KEY, pbBuffer, dwBufferLen, 0, NULL, NULL, &cbKeyBlob))
+	{
+		mylog("Failed to parse private key. Error 0x%.8X\n", GetLastError());
+		goto cleanup;
+	}
+	if (pbKeyBlob = malloc(cbKeyBlob), NULL == pbKeyBlob)
+		goto cleanup;
+	if (!CryptDecodeObjectEx(X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
+		PKCS_RSA_PRIVATE_KEY, pbBuffer, dwBufferLen, 0, NULL, pbKeyBlob, &cbKeyBlob))
+	{
+		mylog("Failed to parse private key. Error 0x%.8X\n", GetLastError());
+		goto cleanup;
+	}
+	free(pbBuffer);
+	pbBuffer = NULL;
+
+	// Create a temporary and volatile CSP context in order to import
+	// the key
+	if (!CryptAcquireContext(&hProv, NULL, MS_ENHANCED_PROV, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT))
+	{
+		mylog("CryptAcquireContext failed with error 0x%.8X\n", GetLastError());
+		goto cleanup;
+	}
+	// import private key
+	if (!CryptImportKey(hProv, pbKeyBlob, cbKeyBlob, (HCRYPTKEY) 0, 0, &hKey))
+	{
+		mylog("CryptImportKey failed with error 0x%.8X\n", GetLastError());
+		goto cleanup;
+	}
+	CryptDestroyKey(hKey);
+	hKey = (HCRYPTKEY) 0;
+	free(pbKeyBlob);
+	pbKeyBlob = NULL;
+
+	pgsslcert = getenv("PGSSLCERT");
+	if (!pgsslcert)
+	{
+		appdata = getenv("APPDATA");
+		if (!appdata)			goto cleanup;
+		snprintf(sslcert, sizeof(sslcert), "%s\\postgresql\\postgresql.crt", appdata);
+		pgsslcert = sslcert;
+	}
+
+	hMyCertStore = CertOpenStore(
+			CERT_STORE_PROV_FILENAME_A
+			, 0
+  			, (HCRYPTPROV) NULL
+			, CERT_STORE_OPEN_EXISTING_FLAG | CERT_STORE_READONLY_FLAG
+			, pgsslcert
+			);
+mylog("!!! hMyCertStore=%p sslcert=%s sslkey=%s\n", hMyCertStore, pgsslcert, pgsslkey);
+	if (hMyCertStore != NULL)
+	{
+		PCCERT_CONTEXT	pContext = NULL;
+
+		pContext = CertEnumCertificatesInStore(hMyCertStore, pContext);
+		while (pContext != NULL)
+		{
+			CertSetCertificateContextProperty(pContext, CERT_KEY_PROV_HANDLE_PROP_ID, 0, (const void *) hProv);
+			pContext = CertEnumCertificatesInStore(hMyCertStore, pContext);
+		}
+	}
+
+	success = TRUE;
+cleanup:
+	if (pemdata)
+		free(pemdata);
+	if (pbBuffer)
+		free(pbBuffer);
+	if (pbKeyBlob)
+		free(pbKeyBlob);
+	if (fd != INVALID_HANDLE_VALUE)
+		CloseHandle(fd);
+	if (!success)
+	{
+		HCERTSTORE	hSv = hMyCertStore;
+
+		FreeCertStores();
+		if (hSv == NULL)
+			CertStoreInit_pfx();
+	}
+	if (!hMyCertStore)
+	{
+		mylog("!!! hMyCertStore=%p %d\n", hMyCertStore, GetLastError());
+	}
+	return;
+}
+
+static int InstallRootCA()
+{
+	HCERTSTORE	hTempCertStore = NULL, hRootCertStore = NULL;
+	LPCTSTR pgsslroot = NULL;
+	LPCTSTR appdata = NULL;
+	TCHAR	sslroot[256];
+	PCCERT_CONTEXT	pContext = NULL;
+	int	installed_count = 0, reject_count = 0;
+
+	shortterm_common_lock();
+	if (bRootCALoaded)
+	{	
+		shortterm_common_unlock();
+		goto cleanup;
+	}
+	shortterm_common_unlock();
+
+	pgsslroot = getenv("PGSSLROOTCERT");
+	if (!pgsslroot)
+	{
+		appdata = getenv("APPDATA");
+		if (!appdata)			goto cleanup;
+		snprintf(sslroot, sizeof(sslroot), "%s\\postgresql\\root.crt", appdata);
+		pgsslroot = sslroot;
+	}
+
+	hTempCertStore = CertOpenStore(
+			CERT_STORE_PROV_FILENAME_A
+			, 0
+  			, (HCRYPTPROV) NULL
+			, CERT_STORE_OPEN_EXISTING_FLAG | CERT_STORE_READONLY_FLAG
+			, pgsslroot
+			);
+	if (hTempCertStore == NULL)
+		goto cleanup;
+	hRootCertStore = CertOpenSystemStore(0, TEXT("ROOT"));
+	mylog("hRootCertStore=%p sslroot=%s\n", hRootCertStore, pgsslroot);
+	if (hRootCertStore == NULL)
+		goto cleanup;
+
+	pContext = CertEnumCertificatesInStore(hTempCertStore, pContext);
+	while (pContext != NULL)
+	{
+		if (CertAddCertificateContextToStore(hRootCertStore, pContext, CERT_STORE_ADD_NEWER, NULL))
+			installed_count++;
+		else
+		{
+			int	lasterror = GetLastError();
+			switch (lasterror)
+			{
+				case  CRYPT_E_EXISTS:
+					mylog("Certificate already exists\n");
+					break;
+				case  1223: // ERROR_CANCELED
+					reject_count++;
+					mylog("Certificate canceled\n");
+					break;
+				default:
+					reject_count++;
+					mylog("Failed to install root certificate error=%08x\n", lasterror);
+			}
+		}
+		pContext = CertEnumCertificatesInStore(hRootCertStore, pContext);
+	}
+	shortterm_common_lock();
+	if (!bRootCALoaded)
+	{
+		if (installed_count > 0 ||
+	    	    reject_count == 0)
+			bRootCALoaded = TRUE;
+	}
+	shortterm_common_unlock();
+
+cleanup:
+	if (hTempCertStore)
+		CertCloseStore(hTempCertStore, CERT_CLOSE_STORE_FORCE_FLAG);
+	if (hRootCertStore)
+		CertCloseStore(hRootCertStore, CERT_CLOSE_STORE_FORCE_FLAG);
+
+	return installed_count;
+}
+
+static int DoSchannelNegotiation(SocketClass *self, SspiData *sspidata, const void *opt, int *bReconnect)
 {
 	CSTR func = "DoSchannelNegotiation";
 	SECURITY_STATUS	r = SEC_E_OK;
@@ -260,17 +584,30 @@ static int DoSchannelNegotiation(SocketClass *self, SspiData *sspidata, const vo
 	SecBuffer	ExtraData;
 	BOOL		ret = 0, cCreds = FALSE, cCtxt = FALSE;
 	SchannelSpec	*ssd = &(sspidata->sdata);
+	char		*server = NULL;
 
-	if (SEC_E_OK != (r = CreateSchannelCredentials(NULL, NULL, &ssd->hCred)))
+	if (SEC_E_OK != (r = CreateSchannelCredentials(opt, NULL, &ssd->hCred)))
 	{
 		cmd = "CreateSchannelCredentials";
 		mylog("%s:%s failed\n", func, cmd);
 		goto cleanup;
 	}
 	cCreds = TRUE;
-	if (SEC_E_OK != (r = PerformSchannelClientHandshake(self->socket, &ssd->hCred, NULL, &ssd->hCtxt, &ExtraData)))
+	if (opt != NULL)
+		server = ((ConnInfo *) opt)->server;
+	if (SEC_E_OK != (r = PerformSchannelClientHandshake(self->socket, &ssd->hCred, server, &ssd->hCtxt, &ExtraData)))
 	{
 		cmd = "PerformSchannelClientHandshake";
+		switch (r)
+		{
+			case SEC_E_UNTRUSTED_ROOT:
+				mylog("Installing RootCA\n");
+				if (InstallRootCA() > 0)
+					*bReconnect = 1;
+				break;
+			default:
+				break;
+		}
 		mylog("%s:%s failed\n", func, cmd);
 		goto cleanup;
 	}
@@ -320,6 +657,7 @@ CreateSchannelCredentials(
 	ALG_ID		rgbSupportedAlgs[16];
 	DWORD		dwProtocol = SP_PROT_SSL3 | SP_PROT_SSL2;
 	DWORD		aiKeyExch = 0;
+	char		*sslmode = NULL;
 
 	PCCERT_CONTEXT  pCertContext = NULL;
 
@@ -328,7 +666,9 @@ CreateSchannelCredentials(
 	 * certificate. Otherwise, just create a NULL credential.
 	 */
 
-	if (pszUserName)
+	if (pClientCertContext)
+		pCertContext = pClientCertContext;
+	else if (pszUserName)
 	{
 		/* Find client certificate. Note that this sample just searchs for a 
 		 * certificate that contains the user name somewhere in the subject name.
@@ -388,7 +728,16 @@ CreateSchannelCredentials(
 	 * leave off this flag, in which case the InitializeSecurityContext
 	 * function will validate the server certificate automatically.
  	 */
-	SchannelCred.dwFlags |= SCH_CRED_MANUAL_CRED_VALIDATION;
+	if (opt != NULL)
+		sslmode = ((ConnInfo *) opt)->sslmode;
+	if (sslmode == NULL || sslmode[0] != 'v')
+		SchannelCred.dwFlags |= SCH_CRED_MANUAL_CRED_VALIDATION;
+	else
+	{
+		if (strcmp(sslmode, "verify-full"))
+			SchannelCred.dwFlags |= SCH_CRED_NO_SERVERNAME_CHECK;
+		// InstallRootCA();
+	}
 
 	/*
 	 * Create an SSPI credential.
@@ -412,17 +761,15 @@ CreateSchannelCredentials(
 
 cleanup:
 
-    /*
-     * Free the certificate context. Schannel has already made its own copy.
-     */
+	/*
+	 * Free the certificate context. Schannel has already made its own copy.
+	 */
+	if (pCertContext && pCertContext != pClientCertContext)
+	{
+		CertFreeCertificateContext(pCertContext);
+	}
 
-    if(pCertContext)
-    {
-        CertFreeCertificateContext(pCertContext);
-    }
-
-
-    return Status;
+	return Status;
 }
 
 static
@@ -777,7 +1124,10 @@ SchannelClientHandshakeLoop(
 			 * credentials).
 			 */
             
+			mylog("Server returned SEC_I_INCOMPLETE_CREDENTIALS\n");
+			shortterm_common_lock();
 			GetNewSchannelClientCredentials(phCreds, phContext);
+			shortterm_common_unlock();
 
 			/* Go around again. */
 			fDoRead = FALSE;
@@ -821,58 +1171,27 @@ GetNewSchannelClientCredentials(
 {
 	SCHANNEL_CRED	SchannelCred;
 	CredHandle	hCreds;
-	SecPkgContext_IssuerListInfoEx	IssuerListInfo;
-	PCCERT_CHAIN_CONTEXT		pChainContext;
-	CERT_CHAIN_FIND_BY_ISSUER_PARA	FindByIssuerPara;
 	PCCERT_CONTEXT	pCertContext;
 	TimeStamp	tsExpiry;
 	SECURITY_STATUS	Status;
 
-	/*
-	 * Read list of trusted issuers from schannel.
-	 */
-
-	Status = QueryContextAttributes(phContext,
-					SECPKG_ATTR_ISSUER_LIST_EX,
-					(PVOID)&IssuerListInfo);
-	if (Status != SEC_E_OK)
-	{
-		mylog("Error 0x%p querying issuer list info\n", Status);
+	CertStoreInit();
+	if (hMyCertStore == NULL)
 		return;
-	}
-
 	/*
 	 * Enumerate the client certificates.
 	 */
-
-	ZeroMemory(&FindByIssuerPara, sizeof(FindByIssuerPara));
-
-	FindByIssuerPara.cbSize = sizeof(FindByIssuerPara);
-	FindByIssuerPara.pszUsageIdentifier = szOID_PKIX_KP_CLIENT_AUTH;
-	FindByIssuerPara.dwKeySpec	= 0;
-	FindByIssuerPara.cIssuer	= IssuerListInfo.cIssuers;
-	FindByIssuerPara.rgIssuer	= IssuerListInfo.aIssuers;
-
-	pChainContext = NULL;
-
+	pCertContext = NULL;
 	while (TRUE)
 	{
-		/* Find a certificate chain. */
-		pChainContext = CertFindChainInStore(hMyCertStore,
-						X509_ASN_ENCODING,
-						0,
-						CERT_CHAIN_FIND_BY_ISSUER,
-						&FindByIssuerPara,
-						pChainContext);
-		if (pChainContext == NULL)
+		pCertContext = CertEnumCertificatesInStore(hMyCertStore,
+						pCertContext);
+		if (pCertContext == NULL)
 		{
-			mylog("Error 0x%p finding cert chain\n", GetLastError());
+			mylog("Error 0x%p enum cert chain\n", GetLastError());
 			break;
 		}
-		mylog("\ncertificate chain found\n");
-
-		/* Get pointer to leaf certificate context. */
-		pCertContext = pChainContext->rgpChain[0]->rgpElement[0]->pCertContext;
+		mylog("certificate context found\n");
 
 		ZeroMemory(&SchannelCred, sizeof(SchannelCred));
         	/* Create schannel credential. */
@@ -895,7 +1214,7 @@ GetNewSchannelClientCredentials(
 			 mylog("**** Error 0x%p returned by AcquireCredentialsHandle\n", Status);
 			continue;
 		}
-		mylog("\nnew schannel credential created\n");
+		mylog("new schannel client credential created\n");
 
 		/* Destroy the old credentials. */
 		FreeCredentialsHandle(phCreds);
@@ -919,6 +1238,8 @@ GetNewSchannelClientCredentials(
 		 * the time is rather expensive.
 		 */
 
+		if (pCertContext)
+			pClientCertContext = pCertContext;
 		break;
 	}
 }
@@ -934,7 +1255,7 @@ GetNewSchannelClientCredentials(
 static SECURITY_STATUS CreateKerberosEtcCredentials(LPCTSTR, SEC_CHAR *, LPCTSTR, PCredHandle);
 static SECURITY_STATUS PerformKerberosEtcClientHandshake(SocketClass *, KerberosEtcSpec *ssd, size_t);
 
-static int DoKerberosNegotiation(SocketClass *self, SspiData *sspidata, const void *opt)
+static int DoKerberosNegotiation(SocketClass *self, SspiData *sspidata, const void *opt, int *bReconnect)
 {
 	CSTR func = "DoKerberosNegotiation";
 	SECURITY_STATUS	r = SEC_E_OK;
@@ -958,7 +1279,7 @@ mylog("!!! CreateKerberosCredentials passed\n");
 	return DoKerberosEtcProcessAuthentication(self, NULL);
 }
 
-static int DoNegotiateNegotiation(SocketClass *self, SspiData *sspidata, const void *opt)
+static int DoNegotiateNegotiation(SocketClass *self, SspiData *sspidata, const void *opt, int *bReconnect)
 {
 	CSTR func = "DoNegotiateNegotiation";
 	SECURITY_STATUS	r = SEC_E_OK;

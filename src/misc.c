@@ -8,11 +8,12 @@
  *
  * API functions:	none
  *
- * Comments:		See "notice.txt" for copyright and license information.
+ * Comments:		See "readme.txt" for copyright and license information.
  *-------
  */
 
 #include "psqlodbc.h"
+#include "misc.h"
 
 #include <stdio.h>
 #include <stdarg.h>
@@ -158,7 +159,7 @@ make_lstring_ifneeded(ConnectionClass *conn, const SQLCHAR *s, ssize_t len, BOOL
 	if (s && (len > 0 || (len == SQL_NTS && (length = strlen(ccs)) > 0)))
 	{
 		int	i;
-		const char *ptr;
+		const UCHAR *ptr;
 		encoded_str encstr;
 
 		make_encoded_str(&encstr, conn, ccs);
@@ -199,7 +200,7 @@ make_lstring_ifneeded(ConnectionClass *conn, const SQLCHAR *s, ssize_t len, BOOL
  *	This is heavily used in creating queries for info routines (SQLTables, SQLColumns).
  *	This routine could be modified to use vsprintf() to handle multiple arguments.
  */
-char *
+static char *
 my_strcat(char *buf, const char *fmt, const char *s, ssize_t len)
 {
 	if (s && (len > 0 || (len == SQL_NTS && strlen(s) > 0)))
@@ -249,12 +250,12 @@ remove_newlines(char *string)
 char *
 my_trim(char *s)
 {
-	int		i;
+	char *last;
 
-	for (i = strlen(s) - 1; i >= 0; i--)
+	for (last = s + strlen(s) - 1; last >= s; last--)
 	{
-		if (s[i] == ' ')
-			s[i] = '\0';
+		if (*last == ' ')
+			*last = '\0';
 		else
 			break;
 	}
@@ -266,7 +267,7 @@ my_trim(char *s)
  *	my_strcat1 is a extension of my_strcat.
  *	It can have 1 more parameter than my_strcat.
  */
-char *
+static char *
 my_strcat1(char *buf, const char *fmt, const char *s1, const char *s, ssize_t len)
 {
 	ssize_t	length = len;
@@ -358,3 +359,43 @@ strlcat(char *dst, const char *src, size_t size)
 	return ttllen;
 }
 #endif /* HAVE_STRLCAT */
+
+
+/*
+ * Proprly quote and escape a possibly schema-qualified table name.
+ * Returns a statically allocated buffer.
+ */
+char *
+quote_table(const pgNAME schema, pgNAME table)
+{
+	static char buf[200];
+	const char *ptr;
+	int			i;
+
+	i = 0;
+
+	if (NAME_IS_VALID(schema))
+	{
+		buf[i++] = '"';
+		for (ptr = SAFE_NAME(schema); *ptr != '\0' && i < sizeof(buf) - 6; ptr++)
+		{
+			buf[i++] = *ptr;
+			if (*ptr == '"')
+				buf[i++] = '"'; 		/* escape quotes by doubling them */
+		}
+		buf[i++] = '"';
+		buf[i++] = '.';
+	}
+
+	buf[i++] = '"';
+	for (ptr = SAFE_NAME(table); *ptr != '\0' && i < sizeof(buf) - 3; ptr++)
+	{
+		buf[i++] = *ptr;
+		if (*ptr == '"')
+			buf[i++] = '"'; 		/* escape quotes by doubling them */
+	}
+	buf[i++] = '"';
+	buf[i] = '\0';
+
+	return buf;
+}

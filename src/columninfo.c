@@ -8,7 +8,7 @@
  *
  * API functions:	none
  *
- * Comments:		See "notice.txt" for copyright and license information.
+ * Comments:		See "readme.txt" for copyright and license information.
  *-------
  */
 
@@ -30,6 +30,7 @@ CI_Constructor()
 
 	if (rv)
 	{
+		rv->refcount = 0;
 		rv->num_fields = 0;
 		rv->coli_array = NULL;
 	}

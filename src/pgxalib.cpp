@@ -129,7 +129,7 @@ HDBC	XAConnection::ActivateConnection(void)
 	{
 		ret = SQLSetEnvAttr(init_crit.env, SQL_ATTR_ODBC_VERSION, (PTR) SQL_OV_ODBC3, 0);
 		ret = SQLAllocHandle(SQL_HANDLE_DBC, init_crit.env, &xaconn);
-		if (SQL_SUCCESS == ret || SQL_SUCCESS_WITH_INFO)
+		if (SQL_SUCCESS == ret || SQL_SUCCESS_WITH_INFO == ret)
 		{
 			string	cstr = connstr;
 			if (dtclog)
@@ -387,7 +387,7 @@ static int	TextToXid(XID &xid, const char *rtext)
 	int	slen, glen, blen;
 	char	*sptr;
 
-	slen = strlen(rtext);
+	slen = (int) strlen(rtext);
 	sptr = (char *)strchr(rtext, '-');
 	if (sptr)
 	{
@@ -604,7 +604,7 @@ EXTERN_C static int __cdecl xa_recover(XID *xids, long count, int rmid, long fla
 		SQLFreeHandle(SQL_HANDLE_STMT, stmt);
 		pos = 0;
 	}
-	rcount = vec.size();
+	rcount = (int) vec.size();
 	rmcode = rcount - pos;
 	if (rmcode > count)
 		rmcode = count;

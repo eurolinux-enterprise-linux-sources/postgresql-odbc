@@ -8,11 +8,11 @@
  *
  * API functions:	none
  *
- * Comments:		See "notice.txt" for copyright and license information.
+ * Comments:		See "readme.txt" for copyright and license information.
  *-------
  */
 
-#include "psqlodbc.h"
+#include "socket.h"
 
 #ifdef	USE_SSPI
 #include "sspisvcs.h"
@@ -26,14 +26,15 @@
 #include <openssl/ssl.h>
 #endif /* USE_SSL */
 #endif /* NOT_USE_LIBPQ */
-#include "socket.h"
+#include "misc.h"
 #include "loadlib.h"
 
 #include "connection.h"
 
 #ifdef WIN32
 #include <time.h>
-#include <Wspiapi.h>
+#include <Wspiapi.h>	/* Ensure to support the backward-compatibility version
+			   of getaddrinfo() etc */
 #else
 #include <stdlib.h>
 #include <string.h>				/* for memset */
@@ -65,16 +66,6 @@ static void SOCK_set_error(SocketClass *s, int _no, const char *_msg)
 		s->_errormsg_ = NULL;
 	mylog("(%d)%s ERRNO=%d\n", _no, _msg, gerrno);
 }
-
-void
-SOCK_clear_error(SocketClass *self)
-{
-	self->errornumber = 0;
-	if (NULL != self->_errormsg_)
-		free(self->_errormsg_);
-	self->_errormsg_ = NULL;
-}
-
 
 SocketClass *
 SOCK_Constructor(const ConnectionClass *conn)
@@ -188,11 +179,17 @@ SOCK_Destructor(SocketClass *self)
 	free(self);
 }
 
+#ifdef	WIN32
+static inet_pton_func inet_pton_ptr = NULL;
+static HMODULE ws2_hnd = NULL;
+#else
+static inet_pton_func inet_pton_ptr = inet_pton;
+#endif /* WIN32 */
+
 #if defined(_MSC_VER) && (_MSC_VER < 1300)
 static freeaddrinfo_func freeaddrinfo_ptr = NULL;
 static getaddrinfo_func getaddrinfo_ptr = NULL;
 static getnameinfo_func getnameinfo_ptr = NULL;
-static	HMODULE ws2_hnd = NULL;
 #else
 static freeaddrinfo_func freeaddrinfo_ptr = freeaddrinfo;
 static getaddrinfo_func getaddrinfo_ptr = getaddrinfo;
@@ -239,7 +236,19 @@ static BOOL format_sockerr(char *errmsg, size_t buflen, int errnum, const char *
 		snprintf(errmsg, buflen, "%s failed for [%s:%d] ", cmd, host, portno);
 	return ret;
 }
- 
+
+static int
+is_numeric_address(const char *hostname)
+{
+	if (inet_pton_ptr != NULL)
+	{
+		char unused[16];
+		return (inet_pton_ptr(AF_INET, hostname, &unused) ||
+			inet_pton_ptr(AF_INET6, hostname, &unused));
+	}
+	return (inet_addr(hostname) != INADDR_NONE);
+}
+
 char
 SOCK_connect_to(SocketClass *self, unsigned short port, char *hostname, long timeout)
 {
@@ -254,9 +263,15 @@ SOCK_connect_to(SocketClass *self, unsigned short port, char *hostname, long tim
 		return 0;
 	}
 
-#if defined(_MSC_VER) && (_MSC_VER < 1300)
+#ifdef	WIN32
 	if (ws2_hnd == NULL)
+	{
 		ws2_hnd = GetModuleHandle("ws2_32.dll");
+		if (inet_pton_ptr == NULL)
+			inet_pton_ptr = (inet_pton_func)GetProcAddress(ws2_hnd, "inet_pton");
+	} 
+#endif /* WIN32 */
+#if defined(_MSC_VER) && (_MSC_VER < 1300)
 	if (freeaddrinfo_ptr == NULL)
 		freeaddrinfo_ptr = (freeaddrinfo_func)GetProcAddress(ws2_hnd, "freeaddrinfo"); 
 	if (getaddrinfo_ptr == NULL)
@@ -280,8 +295,10 @@ SOCK_connect_to(SocketClass *self, unsigned short port, char *hostname, long tim
 		rest.ai_socktype = SOCK_STREAM;
 		rest.ai_family = AF_UNSPEC;
 		snprintf(portstr, sizeof(portstr), "%d", port);
-		if (inet_addr(hostname) != INADDR_NONE)
-			rest.ai_flags |= AI_NUMERICHOST;	
+		rest.ai_flags |= AI_NUMERICSERV;
+		if (is_numeric_address(hostname))
+			/* don't resolve address in getaddrinfo() if not necessary */
+			rest.ai_flags |= AI_NUMERICHOST;
 		ret = getaddrinfo_ptr(hostname, portstr, &rest, &addrs);
 		if (ret || !addrs)
 		{
@@ -414,7 +431,7 @@ retry:
 				if (t_now = time(NULL), t_now >= t_finish)
 					tm_exp = TRUE;
 				else
-					wait_sec = t_finish - t_now;
+					wait_sec = (int) (t_finish - t_now);
 			}
 		} while (!tm_exp);
 		if (tm_exp)
@@ -501,7 +518,7 @@ static int SOCK_wait_for_ready(SocketClass *sock, BOOL output, int retry_count)
 	else if (0  > retry_count)
 		no_timeout = TRUE;
 #ifdef	USE_SSL
-	else if (sock && NULL == sock->ssl)
+	else if (sock->ssl == NULL)
 		no_timeout = TRUE;
 #endif /* USE_SSL */
 	do {
@@ -530,8 +547,7 @@ mylog("!!!  poll ret=%d revents=%x\n", ret, fds.revents);
 	if (0 == ret && retry_count > MAX_RETRY_COUNT)
 	{
 		ret = -1;
-		if (sock)
-			SOCK_set_error(sock, output ? SOCKET_WRITE_TIMEOUT : SOCKET_READ_TIMEOUT, "SOCK_wait_for_ready timeout");
+		SOCK_set_error(sock, output ? SOCKET_WRITE_TIMEOUT : SOCKET_READ_TIMEOUT, "SOCK_wait_for_ready timeout");
 	}
 	return ret;
 }
@@ -711,9 +727,9 @@ SOCK_get_n_char(SocketClass *self, char *buffer, Int4 len)
 
 
 void
-SOCK_put_n_char(SocketClass *self, const char *buffer, Int4 len)
+SOCK_put_n_char(SocketClass *self, const char *buffer, size_t len)
 {
-	int			lf;
+	size_t			lf;
 
 	if (!self)
 		return;

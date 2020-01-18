@@ -9,7 +9,7 @@
  *
  * API functions:	none
  *
- * Comments:		See "notice.txt" for copyright and license information.
+ * Comments:		See "readme.txt" for copyright and license information.
  *--------
  */
 
@@ -21,6 +21,10 @@
 #include "psqlodbc.h"
 #include "dlg_specific.h"
 #include "environ.h"
+#ifdef	USE_SSPI
+#include "sspisvcs.h"
+#endif /* USE_SSPI */
+#include "misc.h"
 
 #ifdef WIN32
 #include "loadlib.h"
@@ -86,16 +90,64 @@ int	initialize_global_cs(void)
 	getMutexAttr();
 #endif /* POSIX_THREADMUTEX_SUPPORT */
 	InitializeLogging();
+	memset(&globals, 0, sizeof(globals));
 	INIT_CONNS_CS;
 	INIT_COMMON_CS;
 
 	return 0;
 }
 
+#define	CORR_STRCPY(item)	strncpy_null(to->item, from->item, sizeof(to->item))
+#define	CORR_VALCPY(item)	(to->item = from->item)
+
+void	copy_globals(GLOBAL_VALUES *to, const GLOBAL_VALUES *from)
+{
+	memset(to, 0, sizeof(*to));
+	/***
+	memcpy(to, from, sizeof(GLOBAL_VALUES));
+	SET_NAME_DIRECTLY(to->drivername, NULL);
+	SET_NAME_DIRECTLY(to->conn_settings, NULL);
+	***/
+	NAME_TO_NAME(to->drivername, from->drivername);
+	CORR_VALCPY(fetch_max);
+	CORR_VALCPY(socket_buffersize);
+	CORR_VALCPY(unknown_sizes);
+	CORR_VALCPY(max_varchar_size);
+	CORR_VALCPY(max_longvarchar_size);
+	CORR_VALCPY(debug);
+	CORR_VALCPY(commlog);
+	CORR_VALCPY(disable_optimizer);
+	CORR_VALCPY(ksqo);
+	CORR_VALCPY(unique_index);
+	CORR_VALCPY(onlyread);		/* readonly is reserved on Digital C++
+								 * compiler */
+	CORR_VALCPY(use_declarefetch);
+	CORR_VALCPY(text_as_longvarchar);
+	CORR_VALCPY(unknowns_as_longvarchar);
+	CORR_VALCPY(bools_as_char);
+	CORR_VALCPY(lie);
+	CORR_VALCPY(parse);
+	CORR_VALCPY(cancel_as_freestmt);
+	CORR_STRCPY(extra_systable_prefixes);
+	CORR_STRCPY(protocol);
+	NAME_TO_NAME(to->conn_settings, from->conn_settings);
+
+	mylog("copy_globals driver=%s socket_buffersize=%d\n", SAFE_NAME(to->drivername), to->socket_buffersize);
+}
+#undef	CORR_STRCPY
+#undef	CORR_VALCPY
+
+void	finalize_globals(GLOBAL_VALUES *glbv)
+{
+	NULL_THE_NAME(glbv->drivername);
+	NULL_THE_NAME(glbv->conn_settings);
+}
+
 static void finalize_global_cs(void)
 {
 	DELETE_COMMON_CS;
 	DELETE_CONNS_CS;
+	finalize_globals(&globals);
 	FinalizeLogging();
 #ifdef	_DEBUG
 #ifdef	_MEMORY_DEBUG_
@@ -145,6 +197,9 @@ DllMain(HANDLE hInst, ULONG ul_reason_for_call, LPVOID lpReserved)
 
 		case DLL_PROCESS_DETACH:
 			mylog("DETACHING PROCESS\n");
+#ifdef	USE_SSPI
+			LeaveSSPIService();
+#endif /* USE_SSPI */
 			CleanupDelayLoadedDLLs();
 			/* my(q)log is unavailable from here */
 			finalize_global_cs();
@@ -166,23 +221,26 @@ DllMain(HANDLE hInst, ULONG ul_reason_for_call, LPVOID lpReserved)
 
 #ifdef __GNUC__
 
-/* This function is called at library initialization time.	*/
+/* Shared library initializer and destructor, using gcc's attributes */
 
-static BOOL
+static void
 __attribute__((constructor))
-init(void)
+psqlodbc_init(void)
 {
 	initialize_global_cs();
 	getCommonDefaults(DBMS_NAME, ODBCINST_INI, NULL);
-	return TRUE;
+}
+
+static void
+__attribute__((destructor))
+psqlodbc_fini(void)
+{
+	finalize_global_cs();
 }
 
 #else							/* not __GNUC__ */
 
-/*
- * These two functions do shared library initialziation on UNIX, well at least
- * on Linux. I don't know about other systems.
- */
+/* Shared library initialization on non-gcc systems. */
 BOOL
 _init(void)
 {

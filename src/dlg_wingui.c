@@ -13,12 +13,13 @@
  *
  * API functions:	none
  *
- * Comments:		See "notice.txt" for copyright and license information.
+ * Comments:		See "readme.txt" for copyright and license information.
  *-------
  */
 /* Multibyte support	Eiji Tokuya 2001-03-15 */
 
 #include "dlg_specific.h"
+#include "misc.h" // strncpy_null
 #include "win_setup.h"
 
 #include "convert.h"
@@ -63,10 +64,11 @@ SetDlgStuff(HWND hdlg, const ConnInfo *ci)
 	SetDlgItemText(hdlg, IDC_DATABASE, ci->database);
 	SetDlgItemText(hdlg, IDC_SERVER, ci->server);
 	SetDlgItemText(hdlg, IDC_USER, ci->username);
-	SetDlgItemText(hdlg, IDC_PASSWORD, ci->password);
+	SetDlgItemText(hdlg, IDC_PASSWORD, SAFE_NAME(ci->password));
 	SetDlgItemText(hdlg, IDC_PORT, ci->port);
 
 	dsplevel = 0;
+#ifndef NOT_USE_LIBPQ
 	libpq_exist = SSLLIB_check();
 mylog("libpq_exist=%d\n", libpq_exist);
 	if (libpq_exist)
@@ -75,11 +77,13 @@ mylog("libpq_exist=%d\n", libpq_exist);
 		dsplevel = 2;
 	}
 	else
+#endif /* NOT_USE_LIBPQ */
 	{
 mylog("SendMessage CTL_COLOR\n");
 		SendMessage(GetDlgItem(hdlg, IDC_NOTICE_USER), WM_CTLCOLOR, 0, 0);
 #ifdef	USE_SSPI
-		dsplevel = 1;
+		ShowWindow(GetDlgItem(hdlg, IDC_NOTICE_USER), SW_HIDE);
+		dsplevel = 2;
 #endif /* USE_SSPI */
 	}
 
@@ -114,13 +118,15 @@ void
 GetDlgStuff(HWND hdlg, ConnInfo *ci)
 {
 	int	sslposition;
+	char	medium_buf[MEDIUM_REGISTRY_LEN];
 
 	GetDlgItemText(hdlg, IDC_DESC, ci->desc, sizeof(ci->desc));
 
 	GetDlgItemText(hdlg, IDC_DATABASE, ci->database, sizeof(ci->database));
 	GetDlgItemText(hdlg, IDC_SERVER, ci->server, sizeof(ci->server));
 	GetDlgItemText(hdlg, IDC_USER, ci->username, sizeof(ci->username));
-	GetDlgItemText(hdlg, IDC_PASSWORD, ci->password, sizeof(ci->password));
+	GetDlgItemText(hdlg, IDC_PASSWORD, medium_buf, sizeof(medium_buf));
+	STR_TO_NAME(ci->password, medium_buf);
 	GetDlgItemText(hdlg, IDC_PORT, ci->port, sizeof(ci->port));
 	sslposition = (int)(DWORD)SendMessage(GetDlgItem(hdlg, IDC_SSLMODE), CB_GETCURSEL, 0L, 0L);
 	strncpy_null(ci->sslmode, modetab[sslposition].modestr, sizeof(ci->sslmode));
@@ -214,7 +220,7 @@ driver_optionsDraw(HWND hdlg, const ConnInfo *ci, int src, BOOL enable)
 	SetDlgItemText(hdlg, DRV_EXTRASYSTABLEPREFIXES, comval->extra_systable_prefixes);
 
 	/* Driver Connection Settings */
-	SetDlgItemText(hdlg, DRV_CONNSETTINGS, comval->conn_settings);
+	SetDlgItemText(hdlg, DRV_CONNSETTINGS, SAFE_NAME(comval->conn_settings));
 	EnableWindow(GetDlgItem(hdlg, DRV_CONNSETTINGS), enable);
 	ShowWindow(GetDlgItem(hdlg, IDPREVPAGE), enable ? SW_HIDE : SW_SHOW);
 	ShowWindow(GetDlgItem(hdlg, IDNEXTPAGE), enable ? SW_HIDE : SW_SHOW);
@@ -268,7 +274,13 @@ driver_options_update(HWND hdlg, ConnInfo *ci, const char *updateDriver)
 
 	/* Driver Connection Settings */
 	if (!ci)
-		GetDlgItemText(hdlg, DRV_CONNSETTINGS, comval->conn_settings, sizeof(comval->conn_settings));
+	{
+		char	conn_settings[LARGE_REGISTRY_LEN];
+
+		GetDlgItemText(hdlg, DRV_CONNSETTINGS, conn_settings, sizeof(conn_settings));
+		if ('\0' != conn_settings[0])
+			STR_TO_NAME(comval->conn_settings, conn_settings);
+	}
 
 	if (updateDriver)
 	{
@@ -595,7 +607,7 @@ ds_options2Proc(HWND hdlg,
 			EnableWindow(GetDlgItem(hdlg, DS_FAKEOIDINDEX), atoi(ci->show_oid_column));
 
 			/* Datasource Connection Settings */
-			SetDlgItemText(hdlg, DS_CONNSETTINGS, ci->conn_settings);
+			SetDlgItemText(hdlg, DS_CONNSETTINGS, SAFE_NAME(ci->conn_settings));
 			break;
 
 		case WM_COMMAND:
@@ -670,7 +682,12 @@ ds_options2Proc(HWND hdlg,
 					sprintf(ci->show_oid_column, "%d", IsDlgButtonChecked(hdlg, DS_SHOWOIDCOLUMN));
 
 					/* Datasource Connection Settings */
-					GetDlgItemText(hdlg, DS_CONNSETTINGS, ci->conn_settings, sizeof(ci->conn_settings));
+					{
+						char conn_settings[LARGE_REGISTRY_LEN];
+						GetDlgItemText(hdlg, DS_CONNSETTINGS, conn_settings, sizeof(conn_settings));
+						if ('\0' != conn_settings[0])
+							STR_TO_NAME(ci->conn_settings, conn_settings);
+					}
 					if (IDAPPLY == cmd)
 					{
 						SendMessage(GetWindow(hdlg, GW_OWNER), WM_COMMAND, wParam, lParam);

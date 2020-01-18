@@ -9,7 +9,7 @@
  * API functions:	SQLPrepare, SQLExecute, SQLExecDirect, SQLTransact,
  *					SQLCancel, SQLNativeSql, SQLParamData, SQLPutData
  *
- * Comments:		See "notice.txt" for copyright and license information.
+ * Comments:		See "readme.txt" for copyright and license information.
  *-------
  */
 
@@ -45,6 +45,7 @@ PGAPI_Prepare(HSTMT hstmt,
 	CSTR func = "PGAPI_Prepare";
 	StatementClass *self = (StatementClass *) hstmt;
 	RETCODE	retval = SQL_SUCCESS;
+	BOOL	prepared;
 
 	mylog("%s: entering...\n", func);
 
@@ -63,6 +64,7 @@ PGAPI_Prepare(HSTMT hstmt,
 	 * one
 	 */
 
+	prepared = self->prepared;
 	SC_set_prepared(self, NOT_YET_PREPARED);
 	switch (self->status)
 	{
@@ -85,6 +87,8 @@ PGAPI_Prepare(HSTMT hstmt,
 
 		case STMT_READY:
 			mylog("**** PGAPI_Prepare: STMT_READY, change SQL\n");
+			if (NOT_YET_PREPARED != prepared) 
+				SC_recycle_statement(self); /* recycle the statement */
 			break;
 
 		case STMT_EXECUTING:
@@ -434,6 +438,9 @@ RETCODE	Exec_with_parameters_resolved(StatementClass *stmt, BOOL *exec_end)
 	conn = SC_get_conn(stmt);
 	mylog("%s: copying statement params: trans_status=%d, len=%d, stmt='%s'\n", func, conn->transact_status, strlen(stmt->statement), stmt->statement);
 
+#define	return	DONT_CALL_RETURN_FROM_HERE???
+#define	RETURN(code)	{ retval = code; goto cleanup; }
+	ENTER_CONN_CS(conn);
 	/* save the cursor's info before the execution */
 	cursor_type = stmt->options.cursor_type;
 	scroll_concurrency = stmt->options.scroll_concurrency;
@@ -451,7 +458,7 @@ inolog("prepare_before_exec=%d srv=%d\n", prepare_before_exec, conn->connInfo.us
 	{
 		stmt->exec_current_row = -1;
 		*exec_end = TRUE;
-		return retval; /* error msg is passed from the above */
+		RETURN(retval) /* error msg is passed from the above */
 	}
 
 	mylog("   stmt_with_params = '%s'\n", stmt->stmt_with_params);
@@ -462,22 +469,23 @@ inolog("prepare_before_exec=%d srv=%d\n", prepare_before_exec, conn->connInfo.us
 	if (stmt->inaccurate_result && SC_is_parse_tricky(stmt))
 	{
 		BOOL		in_trans = CC_is_in_trans(conn);
-		BOOL		issued_begin = FALSE,
-					begin_included = FALSE;
+		BOOL		issued_begin = FALSE;
 		QResultClass *curres;
 
 		stmt->exec_current_row = -1;
 		*exec_end = TRUE;
 		if (!SC_is_pre_executable(stmt))
-			return SQL_SUCCESS;
+			RETURN(SQL_SUCCESS)
 		if (strnicmp(stmt->stmt_with_params, "BEGIN;", 6) == 0)
-			begin_included = TRUE;
+		{
+			/* do nothing */
+		}
 		else if (!in_trans)
 		{
 			if (issued_begin = CC_begin(conn), !issued_begin)
 			{
 				SC_set_error(stmt, STMT_EXEC_ERROR,  "Handle prepare error", func);
-				return SQL_ERROR;
+				RETURN(SQL_ERROR)
 			}
 		}
 		/* we are now in a transaction */
@@ -490,7 +498,7 @@ inolog("prepare_before_exec=%d srv=%d\n", prepare_before_exec, conn->connInfo.us
 #endif /* LEGACY_MODE_ */
 			SC_set_error(stmt, STMT_EXEC_ERROR, "Handle prepare error", func);
 			QR_Destructor(res);
-			return SQL_ERROR;
+			RETURN(SQL_ERROR)
 		}
 		SC_set_Result(stmt, res);
 		for (curres = res; !curres->num_fields; curres = curres->next)
@@ -502,7 +510,7 @@ inolog("prepare_before_exec=%d srv=%d\n", prepare_before_exec, conn->connInfo.us
 				CC_commit(conn);
 		}
 		stmt->status = STMT_FINISHED;
-		return SQL_SUCCESS;
+		RETURN(SQL_SUCCESS)
 	}
 	/*
 	 *	The real execution.
@@ -513,7 +521,7 @@ mylog("about to begin SC_execute\n");
 	{
 		stmt->exec_current_row = -1;
 		*exec_end = TRUE;
-		return retval;
+		RETURN(retval)
 	}
 	res = SC_get_Result(stmt);
 	/* special handling of result for keyset driven cursors */
@@ -524,10 +532,8 @@ mylog("about to begin SC_execute\n");
 
 		if (kres = res->next, kres)
 		{
-			if (kres->fields)
-				CI_Destructor(kres->fields);
-			kres->fields = res->fields;
-			res->fields = NULL;
+			QR_set_fields(kres, QR_get_fields(res));
+			QR_set_fields(res,  NULL);
 			kres->num_fields = res->num_fields;
 			res->next = NULL;
 			SC_set_Result(stmt, kres);
@@ -627,6 +633,11 @@ inolog("res->next=%p\n", kres);
 		SC_set_error(stmt, STMT_OPTION_VALUE_CHANGED, "cursor updatability changed", func);
 		retval = SQL_SUCCESS_WITH_INFO;
 	}
+
+cleanup:
+#undef	RETURN
+#undef	return
+	LEAVE_CONN_CS(conn);
 	return retval;
 }
 
@@ -1035,7 +1046,7 @@ PGAPI_Execute(HSTMT hstmt, UWORD flag)
 			switch (nCallParse = HowToPrepareBeforeExec(stmt, TRUE))
 			{
 				case shouldParse:
-					if (retval = prepareParameters(stmt, TRUE), SQL_ERROR == retval)
+					if (retval = prepareParameters(stmt), SQL_ERROR == retval)
 						goto cleanup;
 					break;
 			}
@@ -1240,7 +1251,6 @@ PGAPI_Cancel(
 	ConnectionClass *conn;
 	RETCODE		ret = SQL_SUCCESS;
 	BOOL	entered_cs = FALSE;
-	ConnInfo   *ci;
 
 	mylog("%s: entering...\n", func);
 
@@ -1251,7 +1261,6 @@ PGAPI_Cancel(
 		return SQL_INVALID_HANDLE;
 	}
 	conn = SC_get_conn(stmt);
-	ci = &(conn->connInfo);
 
 #define	return	DONT_CALL_RETURN_FROM_HERE???
 	/* StartRollbackState(stmt); */
@@ -1289,6 +1298,8 @@ PGAPI_Cancel(
 		if (conn->driver_version < 0x0350)
 		{
 #ifdef WIN32
+		ConnInfo   *ci = &(conn->connInfo);
+
 		if (ci->drivers.cancel_as_freestmt)
 		{
 	typedef SQLRETURN (SQL_API *SQLAPIPROC)();
@@ -1410,7 +1421,6 @@ PGAPI_ParamData(
 	int		i;
 	Int2		num_p;
 	ConnectionClass	*conn = NULL;
-	ConnInfo   *ci;
 
 	mylog("%s: entering...\n", func);
 
@@ -1421,7 +1431,6 @@ PGAPI_ParamData(
 		goto cleanup;
 	}
 	conn = SC_get_conn(stmt);
-	ci = &(conn->connInfo);
 
 	estmt = stmt->execute_delegate ? stmt->execute_delegate : stmt;
 	apdopts = SC_get_APDF(estmt);
@@ -1481,6 +1490,11 @@ inolog("ipdopts=%p\n", ipdopts);
 			retval = dequeueNeedDataCallback(retval, stmt);
 			goto cleanup;
 		}
+		else
+		{
+			stmt->curr_param_result = 0;
+		}
+
 		if (retval = PGAPI_Execute(estmt, flag), SQL_NEED_DATA != retval)
 		{
 			goto cleanup;
